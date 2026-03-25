@@ -1,0 +1,31 @@
+# Local secrets
+.env
+
+# Python cache / local test output
+__pycache__/
+.pytest_cache/
+
+# Runtime audio inputs and outputs
+audio-input/
+audio-prepared/
+audio-output/
+input-macros/
+prepared-macros/
+Output/
+denoised-tmp/
+
+# Trim artifacts and experiment batches
+trim-artifacts/
+trim-experiments/
+
+# Loose audio files
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.aac
+*.ogg
+*.opus
+*.aif
+*.aiff
+*.wma

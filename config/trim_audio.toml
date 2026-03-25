@@ -1,0 +1,68 @@
+[paths]
+input_dir = "audio-input"
+output_dir = "audio-prepared"
+artifact_dir = "trim-artifacts"
+experiment_dir = "trim-experiments"
+
+[logging]
+level = "INFO"
+structured = true
+
+[silence]
+min_silence_duration_sec = 0.35
+noise_threshold_db = -35.0
+start_pad_sec = 0.0
+end_pad_sec = 0.20
+
+[vad]
+enabled = true
+backend = "webrtcvad"
+aggressiveness = 2
+frame_ms = 30
+confidence_threshold = 0.60
+start_pad_sec = 0.0
+end_pad_sec = 0.20
+min_speech_duration_sec = 0.25
+max_merge_gap_sec = 0.30
+consensus_tolerance_sec = 0.18
+
+[asr]
+enabled = true
+backend = "faster_whisper"
+model_size = "tiny"
+device = "cpu"
+compute_type = "int8"
+analysis_window_sec = 20.0
+
+[intro_classifier]
+enabled = true
+confidence_threshold = 0.74
+date_segment_min_score = 0.18
+post_intro_pad_sec = 0.05
+max_auto_trim_start_sec = 12.0
+title_confidence_threshold = 0.62
+title_max_words = 6
+title_max_duration_sec = 3.5
+repeated_phrases = []
+boilerplate_phrases = [
+  "today is",
+  "this is",
+  "recording for",
+  "recorded on",
+  "sacred space",
+  "voice note",
+  "journal entry",
+]
+
+[decision]
+safe_mode = true
+fail_on_backend_fallback = true
+min_output_duration_sec = 0.50
+manual_review_confidence_below = 0.65
+early_noise_guard_sec = 0.35
+max_start_trim_sec = 15.0
+
+[experiment]
+default_methods = ["ffmpeg-silence", "ffmpeg-vad", "ffmpeg-vad-asr"]
+shortlist_size = 10
+sample_size = 12

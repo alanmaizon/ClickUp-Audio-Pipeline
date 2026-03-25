@@ -1,0 +1,816 @@
+from __future__ import annotations
+
+import json
+import math
+import wave
+from array import array
+from pathlib import Path
+
+import pytest
+
+import trim_raw_audio.pipeline as pipeline_module
+from trim_raw_audio import RawAudioPreparer, load_trim_config
+from trim_raw_audio.models import (
+    BoundaryEvidence,
+    IntroDetectionResult,
+    IntroSegmentClassification,
+    Span,
+    TranscriptResult,
+    TranscriptSegment,
+    TranscriptWord,
+)
+
+
+SAMPLE_RATE = 16_000
+
+
+def _silence(duration_sec: float) -> array:
+    return array("h", [0] * int(SAMPLE_RATE * duration_sec))
+
+
+def _tone(duration_sec: float, *, frequency_hz: float = 220.0, amplitude: float = 0.4) -> array:
+    total = int(SAMPLE_RATE * duration_sec)
+    return array(
+        "h",
+        [
+            int(32767 * amplitude * math.sin(2.0 * math.pi * frequency_hz * (index / SAMPLE_RATE)))
+            for index in range(total)
+        ],
+    )
+
+
+def _noise(duration_sec: float, *, amplitude: float = 0.03) -> array:
+    total = int(SAMPLE_RATE * duration_sec)
+    return array(
+        "h",
+        [
+            int(32767 * amplitude * math.sin(2.0 * math.pi * 40.0 * (index / SAMPLE_RATE)))
+            for index in range(total)
+        ],
+    )
+
+
+def _write_wav(path: Path, *chunks: array) -> None:
+    samples = array("h")
+    for chunk in chunks:
+        samples.extend(chunk)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(SAMPLE_RATE)
+        handle.writeframes(samples.tobytes())
+
+
+class StubVadBackend:
+    name = "stub_vad"
+
+    def __init__(self, evidence: BoundaryEvidence) -> None:
+        self.evidence = evidence
+
+    def analyze(self, *_args, **_kwargs) -> BoundaryEvidence:
+        return self.evidence
+
+    def available(self) -> bool:
+        return True
+
+
+class StubAsrBackend:
+    name = "stub_asr"
+
+    def __init__(self, transcript: TranscriptResult) -> None:
+        self.transcript = transcript
+
+    def transcribe(self, *_args, **_kwargs) -> TranscriptResult:
+        return self.transcript
+
+    def available(self) -> bool:
+        return True
+
+
+class PerFileAsrBackend:
+    name = "per_file_stub_asr"
+
+    def __init__(self, transcripts: dict[str, TranscriptResult]) -> None:
+        self.transcripts = transcripts
+
+    def transcribe(self, input_path: Path, *_args, **_kwargs) -> TranscriptResult:
+        return self.transcripts[input_path.name]
+
+    def available(self) -> bool:
+        return True
+
+
+class UnavailableVadBackend:
+    name = "unavailable_vad"
+
+    def available(self) -> bool:
+        return False
+
+    def check_ready(self) -> str | None:
+        return "stub VAD unavailable"
+
+
+class UnavailableAsrBackend:
+    name = "unavailable_asr"
+
+    def available(self) -> bool:
+        return False
+
+    def check_ready(self, _config=None) -> str | None:
+        return "stub ASR unavailable"
+
+
+def _default_preparer(tmp_path: Path, *, vad_backend=None, asr_backend=None) -> RawAudioPreparer:
+    config = load_trim_config(None)
+    config.paths.output_dir = str(tmp_path / "prepared")
+    config.paths.artifact_dir = str(tmp_path / "artifacts")
+    return RawAudioPreparer(config, vad_backend=vad_backend, asr_backend=asr_backend)
+
+
+def _artifact_dir(tmp_path: Path) -> Path:
+    return tmp_path / "artifacts"
+
+
+def _output_dir(tmp_path: Path) -> Path:
+    return tmp_path / "prepared"
+
+
+def _build_transcript(*segments: TranscriptSegment) -> TranscriptResult:
+    return TranscriptResult(
+        text=" ".join(segment.text for segment in segments),
+        segments=list(segments),
+        backend="stub_asr",
+        confidence=0.95,
+        metadata={"available": True},
+    )
+
+
+def test_silence_only_file_is_flagged_for_review(tmp_path: Path) -> None:
+    audio_path = tmp_path / "silence.wav"
+    _write_wav(audio_path, _silence(2.0))
+    preparer = _default_preparer(tmp_path)
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-silence",
+        dry_run=True,
+    )
+
+    assert result["manifest_row"]["manual_review"] is True
+    assert "No speech window" in (result["decision"]["fallback_reason"] or "")
+    assert result["manifest_row"]["final_start_offset_sec"] == pytest.approx(0.0)
+    assert result["manifest_row"]["final_end_offset_sec"] == pytest.approx(2.0, abs=0.05)
+
+
+def test_vad_can_override_short_noise_before_speech(tmp_path: Path) -> None:
+    audio_path = tmp_path / "noise-before-speech.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.08),
+        _noise(0.10, amplitude=0.05),
+        _silence(0.27),
+        _tone(1.0),
+        _silence(0.25),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.33,
+            end_offset_sec=1.65,
+            speech_start_sec=0.45,
+            speech_end_sec=1.45,
+            confidence=0.92,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.45, end_sec=1.45, label="speech", confidence=0.92, source="stub_vad")],
+        )
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend)
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad",
+        dry_run=True,
+    )
+
+    assert result["manifest_row"]["method_chosen"] == "ffmpeg-vad"
+    assert result["manifest_row"]["final_start_offset_sec"] == pytest.approx(0.33, abs=0.05)
+
+
+def test_spoken_date_intro_is_removed_when_confident(tmp_path: Path) -> None:
+    audio_path = tmp_path / "date-intro.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.50),
+        _tone(2.50, frequency_hz=180.0),
+        _silence(0.40),
+        _tone(2.60, frequency_hz=260.0),
+        _silence(0.30),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.38,
+            end_offset_sec=6.15,
+            speech_start_sec=0.50,
+            speech_end_sec=5.95,
+            confidence=0.93,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.50, end_sec=5.95, label="speech", confidence=0.93, source="stub_vad")],
+        )
+    )
+    transcript = _build_transcript(
+        TranscriptSegment(
+            text="Today is Monday March 3rd 2025 journal entry",
+            start_sec=0.50,
+            end_sec=3.00,
+            words=[
+                TranscriptWord("Today", 0.50, 0.70),
+                TranscriptWord("is", 0.70, 0.82),
+                TranscriptWord("Monday", 0.82, 1.12),
+                TranscriptWord("March", 1.12, 1.38),
+                TranscriptWord("3rd", 1.38, 1.52),
+                TranscriptWord("2025", 1.52, 1.74),
+                TranscriptWord("journal", 1.74, 2.05),
+                TranscriptWord("entry", 2.05, 2.28),
+            ],
+        ),
+        TranscriptSegment(
+            text="The actual reflection starts now",
+            start_sec=3.40,
+            end_sec=4.60,
+            words=[
+                TranscriptWord("The", 3.40, 3.50),
+                TranscriptWord("actual", 3.50, 3.72),
+                TranscriptWord("reflection", 3.72, 4.00),
+                TranscriptWord("starts", 4.00, 4.18),
+                TranscriptWord("now", 4.18, 4.30),
+            ],
+        ),
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend, asr_backend=StubAsrBackend(transcript))
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        dry_run=False,
+    )
+
+    assert result["manifest_row"]["method_chosen"] == "ffmpeg-vad-asr"
+    assert result["manifest_row"]["spoken_intro_removed_sec"] >= 1.3
+    assert result["manifest_row"]["opening_labels"] == "date|content"
+    assert result["manifest_row"]["predicted_date_end_sec"] == pytest.approx(1.74, abs=0.05)
+    assert Path(result["output"]["path"]).exists()
+
+
+def test_content_without_date_intro_is_left_intact(tmp_path: Path) -> None:
+    audio_path = tmp_path / "no-date-intro.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.40),
+        _tone(2.20, frequency_hz=210.0),
+        _silence(0.25),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.28,
+            end_offset_sec=2.85,
+            speech_start_sec=0.40,
+            speech_end_sec=2.65,
+            confidence=0.91,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.40, end_sec=2.65, label="speech", confidence=0.91, source="stub_vad")],
+        )
+    )
+    transcript = _build_transcript(
+        TranscriptSegment(
+            text="Welcome back to the meditation",
+            start_sec=0.40,
+            end_sec=2.30,
+            words=[
+                TranscriptWord("Welcome", 0.40, 0.58),
+                TranscriptWord("back", 0.58, 0.74),
+                TranscriptWord("to", 0.74, 0.82),
+                TranscriptWord("the", 0.82, 0.92),
+                TranscriptWord("meditation", 0.92, 1.20),
+            ],
+        )
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend, asr_backend=StubAsrBackend(transcript))
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        dry_run=True,
+    )
+
+    assert result["manifest_row"]["spoken_intro_removed_sec"] == pytest.approx(0.0)
+    assert result["manifest_row"]["final_start_offset_sec"] == pytest.approx(0.28, abs=0.05)
+
+
+def test_date_followed_by_title_hint_is_removed_before_content(tmp_path: Path) -> None:
+    audio_path = tmp_path / "dp_2026-03-07_inspiration_ricardo-audio.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.40),
+        _tone(1.20, frequency_hz=175.0),
+        _silence(0.20),
+        _tone(0.70, frequency_hz=190.0),
+        _silence(0.20),
+        _tone(1.60, frequency_hz=250.0),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.28,
+            end_offset_sec=4.40,
+            speech_start_sec=0.40,
+            speech_end_sec=4.20,
+            confidence=0.92,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.40, end_sec=4.20, label="speech", confidence=0.92, source="stub_vad")],
+        )
+    )
+    transcript = _build_transcript(
+        TranscriptSegment(
+            text="7 of March",
+            start_sec=0.40,
+            end_sec=1.20,
+            words=[
+                TranscriptWord("7", 0.40, 0.50),
+                TranscriptWord("of", 0.50, 0.58),
+                TranscriptWord("March", 0.58, 0.84),
+            ],
+        ),
+        TranscriptSegment(
+            text="Inspiration",
+            start_sec=1.40,
+            end_sec=1.95,
+            words=[
+                TranscriptWord("Inspiration", 1.40, 1.90),
+            ],
+        ),
+        TranscriptSegment(
+            text="The intimacy of the relationship opens our prayer",
+            start_sec=2.20,
+            end_sec=3.90,
+            words=[
+                TranscriptWord("The", 2.20, 2.30),
+                TranscriptWord("intimacy", 2.30, 2.58),
+                TranscriptWord("of", 2.58, 2.66),
+                TranscriptWord("the", 2.66, 2.76),
+                TranscriptWord("relationship", 2.76, 3.10),
+                TranscriptWord("opens", 3.10, 3.30),
+                TranscriptWord("our", 3.30, 3.40),
+                TranscriptWord("prayer", 3.40, 3.62),
+            ],
+        ),
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend, asr_backend=StubAsrBackend(transcript))
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        dry_run=True,
+    )
+
+    assert result["manifest_row"]["method_chosen"] == "ffmpeg-vad-asr"
+    assert result["manifest_row"]["spoken_intro_removed_sec"] < 1.0
+    assert result["manifest_row"]["predicted_date_end_sec"] == pytest.approx(0.84, abs=0.05)
+    assert result["manifest_row"]["predicted_title_start_sec"] == pytest.approx(1.40, abs=0.05)
+    assert result["manifest_row"]["predicted_content_start_sec"] == pytest.approx(2.20, abs=0.05)
+    assert result["manifest_row"]["opening_labels"] == "date|title|content"
+    assert result["manifest_row"]["final_start_offset_sec"] < 1.40
+    assert result["intro_detection"]["detected"] is True
+    assert "context:inspiration" in result["intro_detection"]["matched_patterns"]
+
+
+def test_title_without_date_is_preserved_even_when_it_matches_context(tmp_path: Path) -> None:
+    audio_path = tmp_path / "dp_2026-03-07_inspiration_ricardo-audio.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.30),
+        _tone(0.70, frequency_hz=190.0),
+        _silence(0.18),
+        _tone(1.50, frequency_hz=250.0),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.18,
+            end_offset_sec=2.78,
+            speech_start_sec=0.30,
+            speech_end_sec=2.68,
+            confidence=0.92,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.30, end_sec=2.68, label="speech", confidence=0.92, source="stub_vad")],
+        )
+    )
+    transcript = _build_transcript(
+        TranscriptSegment(
+            text="Inspiration",
+            start_sec=0.30,
+            end_sec=0.82,
+            words=[
+                TranscriptWord("Inspiration", 0.30, 0.82),
+            ],
+        ),
+        TranscriptSegment(
+            text="The intimacy of the relationship opens our prayer",
+            start_sec=1.00,
+            end_sec=2.40,
+            words=[
+                TranscriptWord("The", 1.00, 1.10),
+                TranscriptWord("intimacy", 1.10, 1.38),
+                TranscriptWord("of", 1.38, 1.46),
+                TranscriptWord("the", 1.46, 1.56),
+                TranscriptWord("relationship", 1.56, 1.90),
+                TranscriptWord("opens", 1.90, 2.10),
+                TranscriptWord("our", 2.10, 2.20),
+                TranscriptWord("prayer", 2.20, 2.42),
+            ],
+        ),
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend, asr_backend=StubAsrBackend(transcript))
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        dry_run=True,
+    )
+
+    assert result["intro_detection"]["detected"] is False
+    assert result["manifest_row"]["spoken_intro_removed_sec"] == pytest.approx(0.0)
+    assert result["manifest_row"]["opening_labels"] == "title|content"
+    assert result["manifest_row"]["predicted_title_start_sec"] == pytest.approx(0.30, abs=0.05)
+    assert result["manifest_row"]["final_start_offset_sec"] == pytest.approx(0.18, abs=0.05)
+
+
+def test_attachment_metadata_can_restore_context_phrases_after_task_id_download(tmp_path: Path) -> None:
+    audio_path = tmp_path / "86abc123.wav"
+    meta_dir = tmp_path / ".metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "86abc123.json").write_text(
+        json.dumps(
+            {
+                "task_id": "86abc123",
+                "task_name": "Gospel",
+                "selected_attachment": {
+                    "title": "dp_2026-03-29_gospel_katherine-audio(1).m4a",
+                    "url_filename": "dp_2026-03-29_gospel_katherine-audio(1).m4a",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_wav(
+        audio_path,
+        _silence(0.35),
+        _tone(0.90, frequency_hz=175.0),
+        _silence(0.18),
+        _tone(0.70, frequency_hz=190.0),
+        _silence(0.18),
+        _tone(1.30, frequency_hz=250.0),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.23,
+            end_offset_sec=3.70,
+            speech_start_sec=0.35,
+            speech_end_sec=3.58,
+            confidence=0.92,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.35, end_sec=3.58, label="speech", confidence=0.92, source="stub_vad")],
+        )
+    )
+    transcript = _build_transcript(
+        TranscriptSegment(
+            text="29 of March",
+            start_sec=0.35,
+            end_sec=0.95,
+            words=[
+                TranscriptWord("29", 0.35, 0.45),
+                TranscriptWord("of", 0.45, 0.52),
+                TranscriptWord("March", 0.52, 0.74),
+            ],
+        ),
+        TranscriptSegment(
+            text="Gospel",
+            start_sec=1.10,
+            end_sec=1.52,
+            words=[
+                TranscriptWord("Gospel", 1.10, 1.50),
+            ],
+        ),
+        TranscriptSegment(
+            text="The reflection begins here",
+            start_sec=1.80,
+            end_sec=2.90,
+            words=[
+                TranscriptWord("The", 1.80, 1.88),
+                TranscriptWord("reflection", 1.88, 2.15),
+                TranscriptWord("begins", 2.15, 2.35),
+                TranscriptWord("here", 2.35, 2.48),
+            ],
+        ),
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend, asr_backend=StubAsrBackend(transcript))
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        dry_run=True,
+    )
+
+    assert result["manifest_row"]["opening_labels"] == "date|title|content"
+    assert "context:gospel" in result["intro_detection"]["matched_patterns"]
+    assert "gospel" in [phrase.lower() for phrase in result["context_phrases"]]
+
+
+def test_prepare_file_writes_prepared_metadata_with_task_mapping(tmp_path: Path) -> None:
+    audio_path = tmp_path / "dp_2026-04-29_inspiration_dinah-audio.wav"
+    meta_dir = tmp_path / ".metadata"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "dp_2026-04-29_inspiration_dinah-audio.json").write_text(
+        json.dumps(
+            {
+                "task_id": "869cjgxgj",
+                "task_name": "dp_2026-04-29_inspiration_dinah-audio",
+                "download_filename": "dp_2026-04-29_inspiration_dinah-audio.wav",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_wav(audio_path, _silence(0.30), _tone(1.0), _silence(0.20))
+    preparer = _default_preparer(tmp_path)
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-silence",
+        dry_run=False,
+    )
+
+    prepared_meta_path = _output_dir(tmp_path) / ".metadata" / "dp_2026-04-29_inspiration_dinah-audio.json"
+    prepared_metadata = json.loads(prepared_meta_path.read_text(encoding="utf-8"))
+
+    assert Path(result["output"]["path"]).exists()
+    assert prepared_metadata["task_id"] == "869cjgxgj"
+    assert prepared_metadata["prepared_filename"] == "dp_2026-04-29_inspiration_dinah-audio.wav"
+    assert prepared_metadata["source_input_filename"] == "dp_2026-04-29_inspiration_dinah-audio.wav"
+
+
+def test_real_words_close_to_the_beginning_are_not_clipped(tmp_path: Path) -> None:
+    audio_path = tmp_path / "near-zero-speech.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.04),
+        _tone(1.20, frequency_hz=240.0),
+        _silence(0.20),
+    )
+    preparer = _default_preparer(tmp_path)
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-silence",
+        dry_run=True,
+    )
+
+    assert result["manifest_row"]["final_start_offset_sec"] <= 0.02
+
+
+def test_requested_vad_method_fails_fast_when_vad_is_unavailable(tmp_path: Path) -> None:
+    audio_path = tmp_path / "need-vad.wav"
+    _write_wav(audio_path, _silence(0.20), _tone(1.0))
+    preparer = _default_preparer(tmp_path, vad_backend=UnavailableVadBackend())
+
+    with pytest.raises(RuntimeError, match="ffmpeg-vad"):
+        preparer.prepare_file(
+            audio_path,
+            output_dir=_output_dir(tmp_path),
+            artifact_root=_artifact_dir(tmp_path),
+            requested_method="ffmpeg-vad",
+            dry_run=True,
+        )
+
+
+def test_requested_asr_method_fails_fast_when_asr_is_unavailable(tmp_path: Path) -> None:
+    audio_path = tmp_path / "need-asr.wav"
+    _write_wav(audio_path, _silence(0.20), _tone(1.0))
+    preparer = _default_preparer(
+        tmp_path,
+        vad_backend=StubVadBackend(
+            BoundaryEvidence(
+                backend="stub_vad",
+                available=True,
+                start_offset_sec=0.1,
+                end_offset_sec=1.1,
+                speech_start_sec=0.2,
+                speech_end_sec=1.0,
+                confidence=0.9,
+                reason="Synthetic VAD evidence.",
+            )
+        ),
+        asr_backend=UnavailableAsrBackend(),
+    )
+
+    with pytest.raises(RuntimeError, match="ffmpeg-vad-asr"):
+        preparer.prepare_file(
+            audio_path,
+            output_dir=_output_dir(tmp_path),
+            artifact_root=_artifact_dir(tmp_path),
+            requested_method="ffmpeg-vad-asr",
+            dry_run=True,
+        )
+
+
+def test_invalid_intro_classification_raises_during_single_file_prepare(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    audio_path = tmp_path / "bad-intro.wav"
+    _write_wav(audio_path, _silence(0.20), _tone(1.0))
+    preparer = _default_preparer(
+        tmp_path,
+        vad_backend=StubVadBackend(
+            BoundaryEvidence(
+                backend="stub_vad",
+                available=True,
+                start_offset_sec=0.1,
+                end_offset_sec=1.1,
+                speech_start_sec=0.2,
+                speech_end_sec=1.0,
+                confidence=0.9,
+                reason="Synthetic VAD evidence.",
+            )
+        ),
+        asr_backend=StubAsrBackend(
+            _build_transcript(
+                TranscriptSegment(
+                    text="March 7",
+                    start_sec=0.2,
+                    end_sec=0.6,
+                    words=[
+                        TranscriptWord("March", 0.2, 0.4),
+                        TranscriptWord("7", 0.4, 0.5),
+                    ],
+                )
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "detect_intro",
+        lambda *_args, **_kwargs: IntroDetectionResult(
+            detected=True,
+            trim_offset_sec=0.6,
+            confidence=0.9,
+            classified_segments=[
+                IntroSegmentClassification(
+                    label="title",
+                    start_sec=0.2,
+                    end_sec=0.6,
+                    text="March 7",
+                    confidence=0.9,
+                    removable=True,
+                )
+            ],
+        ),
+    )
+
+    with pytest.raises(pipeline_module.IntroDetectionValidationError, match="removable"):
+        preparer.prepare_file(
+            audio_path,
+            output_dir=_output_dir(tmp_path),
+            artifact_root=_artifact_dir(tmp_path),
+            requested_method="ffmpeg-vad-asr",
+            dry_run=True,
+        )
+
+
+def test_prepare_batch_continues_past_file_level_intro_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    good_audio = tmp_path / "good.wav"
+    bad_audio = tmp_path / "bad.wav"
+    _write_wav(good_audio, _silence(0.25), _tone(1.0), _silence(0.15))
+    _write_wav(bad_audio, _silence(0.25), _tone(1.0), _silence(0.15))
+
+    output_dir = _output_dir(tmp_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stale_output = output_dir / "bad.wav"
+    stale_output.write_text("stale prepared output", encoding="utf-8")
+
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.13,
+            end_offset_sec=1.32,
+            speech_start_sec=0.25,
+            speech_end_sec=1.15,
+            confidence=0.92,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.25, end_sec=1.15, label="speech", confidence=0.92, source="stub_vad")],
+        )
+    )
+    preparer = _default_preparer(
+        tmp_path,
+        vad_backend=vad_backend,
+        asr_backend=PerFileAsrBackend(
+            {
+                "good.wav": _build_transcript(
+                    TranscriptSegment(
+                        text="Welcome to the reflection",
+                        start_sec=0.25,
+                        end_sec=1.0,
+                        words=[
+                            TranscriptWord("Welcome", 0.25, 0.45),
+                            TranscriptWord("to", 0.45, 0.52),
+                            TranscriptWord("the", 0.52, 0.60),
+                            TranscriptWord("reflection", 0.60, 0.92),
+                        ],
+                    )
+                ),
+                "bad.wav": _build_transcript(
+                    TranscriptSegment(
+                        text="March 7",
+                        start_sec=0.25,
+                        end_sec=0.60,
+                        words=[
+                            TranscriptWord("March", 0.25, 0.45),
+                            TranscriptWord("7", 0.45, 0.55),
+                        ],
+                    )
+                ),
+            }
+        ),
+    )
+
+    original_detect_intro = pipeline_module.detect_intro
+
+    def _fake_detect_intro(transcript: TranscriptResult, *args, **kwargs) -> IntroDetectionResult:
+        if transcript.text == "March 7":
+            return IntroDetectionResult(
+                detected=True,
+                trim_offset_sec=0.60,
+                confidence=0.9,
+                classified_segments=[
+                    IntroSegmentClassification(
+                        label="title",
+                        start_sec=0.25,
+                        end_sec=0.60,
+                        text="March 7",
+                        confidence=0.9,
+                        removable=True,
+                    )
+                ],
+            )
+        return original_detect_intro(transcript, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "detect_intro", _fake_detect_intro)
+
+    result = preparer.prepare_batch(
+        input_dir=tmp_path,
+        output_dir=output_dir,
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        file_names=["good.wav", "bad.wav"],
+        dry_run=False,
+    )
+
+    assert result["summary"]["files_seen"] == 2
+    assert result["summary"]["files_emitted"] == 1
+    assert result["summary"]["files_failed"] == 1
+
+    rows_by_id = {row["file_id"]: row for row in result["rows"]}
+    assert rows_by_id["good"]["method_chosen"] == "ffmpeg-vad-asr"
+    assert rows_by_id["bad"]["method_chosen"] == "error"
+    assert "IntroDetectionValidationError" in rows_by_id["bad"]["failure_or_fallback_reason"]
+    assert rows_by_id["bad"]["manual_review"] is True
+    assert stale_output.exists() is False
+
+    bad_sidecar = _artifact_dir(tmp_path) / "files" / "bad" / "bad.trim.json"
+    payload = json.loads(bad_sidecar.read_text(encoding="utf-8"))
+    assert payload["output"]["stale_output_removed"] is True
+    assert payload["error"]["type"] == "IntroDetectionValidationError"
