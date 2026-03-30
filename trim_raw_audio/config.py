@@ -61,11 +61,18 @@ class IntroClassifierConfig:
     confidence_threshold: float = 0.74
     date_segment_min_score: float = 0.18
     post_intro_pad_sec: float = 0.15
-    min_date_overshoot_sec: float = 0.12
+    min_date_overshoot_sec: float = 0.16
+    max_date_overshoot_sec: float = 0.28
     max_auto_trim_start_sec: float = 12.0
     title_confidence_threshold: float = 0.62
     title_max_words: int = 6
     title_max_duration_sec: float = 3.5
+    boundary_snap_window_sec: float = 0.12
+    boundary_snap_frame_ms: int = 5
+    boundary_snap_threshold_db: float = -38.0
+    no_intro_start_preroll_sec: float = 0.10
+    no_intro_max_backward_snap_sec: float = 0.08
+    leading_fade_in_ms: int = 10
     repeated_phrases: list[str] = field(default_factory=list)
     boilerplate_phrases: list[str] = field(
         default_factory=lambda: [
