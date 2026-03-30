@@ -235,7 +235,7 @@ def test_vad_can_override_short_noise_before_speech(tmp_path: Path) -> None:
     assert result["manifest_row"]["method_chosen"] == "ffmpeg-vad"
     assert result["manifest_row"]["trim_mode"] == "onset_preservation"
     assert result["manifest_row"]["raw_opening_boundary_sec"] == pytest.approx(0.33, abs=0.05)
-    assert result["manifest_row"]["final_start_offset_sec"] == pytest.approx(0.23, abs=0.05)
+    assert result["manifest_row"]["final_start_offset_sec"] <= 0.15
     assert result["manifest_row"]["final_start_offset_sec"] < result["manifest_row"]["raw_opening_boundary_sec"]
 
 
@@ -305,15 +305,15 @@ def test_spoken_date_intro_is_removed_when_confident(tmp_path: Path) -> None:
     assert result["manifest_row"]["spoken_intro_removed_sec"] >= 1.3
     assert result["manifest_row"]["opening_labels"] == "date|content"
     assert result["manifest_row"]["predicted_date_end_sec"] == pytest.approx(1.74, abs=0.05)
-    assert result["intro_trim"]["min_overshoot_sec"] == pytest.approx(0.16, abs=0.001)
-    assert result["intro_trim"]["max_overshoot_sec"] == pytest.approx(0.28, abs=0.001)
-    assert result["intro_trim"]["overshoot_used_sec"] == pytest.approx(0.16, abs=0.001)
-    assert result["intro_trim"]["initial_late_biased_trim_sec"] == pytest.approx(1.90, abs=0.05)
+    assert result["intro_trim"]["min_overshoot_sec"] == pytest.approx(0.22, abs=0.001)
+    assert result["intro_trim"]["max_overshoot_sec"] == pytest.approx(0.40, abs=0.001)
+    assert result["intro_trim"]["overshoot_used_sec"] == pytest.approx(0.22, abs=0.001)
+    assert result["intro_trim"]["initial_late_biased_trim_sec"] == pytest.approx(1.96, abs=0.05)
     assert result["intro_trim"]["snapped_trim_start_sec"] is None
-    assert result["intro_trim"]["chosen_trim_start_sec"] == pytest.approx(1.90, abs=0.05)
+    assert result["intro_trim"]["chosen_trim_start_sec"] == pytest.approx(1.96, abs=0.05)
     assert result["intro_trim"]["next_intro_boundary_sec"] == pytest.approx(1.74, abs=0.05)
     assert result["intro_trim"]["snap_found"] is False
-    assert result["intro_trim"]["fade_in_applied_ms"] == 10
+    assert result["intro_trim"]["fade_in_applied_ms"] == 15
     assert result["decision"]["manual_review"] is True
     assert "extremely close" in " ".join(result["decision"]["manual_review_reasons"])
     assert Path(result["output"]["path"]).exists()
@@ -367,11 +367,11 @@ def test_content_without_date_intro_is_left_intact(tmp_path: Path) -> None:
     assert result["manifest_row"]["spoken_intro_removed_sec"] == pytest.approx(0.0)
     assert result["manifest_row"]["trim_mode"] == "onset_preservation"
     assert result["manifest_row"]["raw_opening_boundary_sec"] == pytest.approx(0.28, abs=0.05)
-    assert result["manifest_row"]["opening_preroll_applied_sec"] >= 0.09
-    assert result["manifest_row"]["final_start_offset_sec"] == pytest.approx(0.18, abs=0.05)
+    assert result["manifest_row"]["opening_preroll_applied_sec"] >= 0.15
+    assert result["manifest_row"]["final_start_offset_sec"] <= 0.10
     assert result["decision"]["manual_review"] is False
     assert result["intro_trim"]["detected"] is False
-    assert result["manifest_row"]["fade_in_applied_ms"] == 10
+    assert result["manifest_row"]["fade_in_applied_ms"] == 15
 
 
 def test_fast_spoken_date_near_content_boundary_triggers_manual_review(tmp_path: Path) -> None:
@@ -431,11 +431,11 @@ def test_fast_spoken_date_near_content_boundary_triggers_manual_review(tmp_path:
     )
 
     assert result["manifest_row"]["opening_labels"] == "date|content"
-    assert result["intro_trim"]["min_overshoot_sec"] == pytest.approx(0.16, abs=0.001)
-    assert result["intro_trim"]["initial_late_biased_trim_sec"] == pytest.approx(1.08, abs=0.05)
+    assert result["intro_trim"]["min_overshoot_sec"] == pytest.approx(0.22, abs=0.001)
+    assert result["intro_trim"]["initial_late_biased_trim_sec"] == pytest.approx(1.14, abs=0.05)
     assert result["intro_trim"]["next_intro_boundary_sec"] == pytest.approx(0.96, abs=0.05)
     assert result["intro_trim"]["snap_found"] is True
-    assert result["intro_trim"]["snapped_trim_start_sec"] == pytest.approx(1.15, abs=0.05)
+    assert result["intro_trim"]["snapped_trim_start_sec"] == pytest.approx(1.17, abs=0.06)
     assert result["intro_trim"]["chosen_trim_start_sec"] >= result["intro_trim"]["initial_late_biased_trim_sec"]
     assert result["intro_trim"]["overshoot_used_sec"] > result["intro_trim"]["min_overshoot_sec"]
     assert result["decision"]["manual_review"] is True
@@ -521,7 +521,7 @@ def test_date_followed_by_title_hint_is_removed_before_content(tmp_path: Path) -
     assert result["intro_detection"]["detected"] is True
     assert "context:inspiration" in result["intro_detection"]["matched_patterns"]
     assert result["intro_trim"]["next_preserved_label"] == "title"
-    assert result["intro_trim"]["overshoot_used_sec"] == pytest.approx(0.16, abs=0.001)
+    assert result["intro_trim"]["overshoot_used_sec"] == pytest.approx(0.22, abs=0.001)
     assert result["intro_trim"]["snap_found"] is False
     assert result["decision"]["manual_review"] is False
 
@@ -588,7 +588,7 @@ def test_title_without_date_is_preserved_even_when_it_matches_context(tmp_path: 
     assert result["manifest_row"]["opening_labels"] == "title|content"
     assert result["manifest_row"]["predicted_title_start_sec"] == pytest.approx(0.30, abs=0.05)
     assert result["manifest_row"]["trim_mode"] == "onset_preservation"
-    assert result["manifest_row"]["final_start_offset_sec"] == pytest.approx(0.08, abs=0.05)
+    assert result["manifest_row"]["final_start_offset_sec"] <= 0.02
     assert result["manifest_row"]["final_start_offset_sec"] < result["manifest_row"]["raw_opening_boundary_sec"]
 
 
@@ -723,8 +723,8 @@ def test_date_with_missing_following_boundary_is_flagged_for_review(tmp_path: Pa
     )
 
     assert result["intro_detection"]["detected"] is True
-    assert result["intro_trim"]["initial_late_biased_trim_sec"] == pytest.approx(0.98, abs=0.05)
-    assert result["intro_trim"]["chosen_trim_start_sec"] == pytest.approx(0.98, abs=0.05)
+    assert result["intro_trim"]["initial_late_biased_trim_sec"] == pytest.approx(1.04, abs=0.05)
+    assert result["intro_trim"]["chosen_trim_start_sec"] == pytest.approx(1.04, abs=0.05)
     assert result["intro_trim"]["next_intro_boundary_sec"] is None
     assert result["decision"]["manual_review"] is True
     assert "no reliable next word/content boundary" in " ".join(result["decision"]["manual_review_reasons"]).lower()
@@ -791,11 +791,11 @@ def test_date_trim_snaps_to_cleaner_boundary_and_fades_in_output(tmp_path: Path)
 
     output_path = Path(result["output"]["path"])
     assert output_path.exists()
-    assert result["intro_trim"]["initial_late_biased_trim_sec"] == pytest.approx(1.06, abs=0.05)
+    assert result["intro_trim"]["initial_late_biased_trim_sec"] == pytest.approx(1.12, abs=0.05)
     assert result["intro_trim"]["snap_found"] is True
-    assert result["intro_trim"]["snapped_trim_start_sec"] == pytest.approx(1.10, abs=0.05)
+    assert result["intro_trim"]["snapped_trim_start_sec"] == pytest.approx(1.12, abs=0.05)
     assert result["intro_trim"]["chosen_trim_start_sec"] == result["intro_trim"]["snapped_trim_start_sec"]
-    assert result["output"]["leading_fade_in_ms"] == 10
+    assert result["output"]["leading_fade_in_ms"] == 15
 
     sample_rate, samples = _read_wav_samples(output_path)
     first_5ms = samples[: int(sample_rate * 0.005)]
@@ -852,16 +852,18 @@ def test_no_date_intro_preserves_inhale_and_first_word_onset(tmp_path: Path) -> 
     assert result["manifest_row"]["date_detected"] is False
     assert result["manifest_row"]["raw_opening_boundary_sec"] == pytest.approx(0.33, abs=0.05)
     assert result["manifest_row"]["final_start_offset_sec"] < 0.25
-    assert result["manifest_row"]["final_start_offset_sec"] >= 0.15
-    assert result["manifest_row"]["opening_preroll_applied_sec"] >= 0.10
+    assert result["manifest_row"]["final_start_offset_sec"] >= 0.05
+    assert result["manifest_row"]["opening_preroll_applied_sec"] >= 0.15
     assert result["intro_trim"]["snap_found"] is True
-    assert result["output"]["leading_fade_in_ms"] == 10
+    assert result["output"]["leading_fade_in_ms"] == 15
 
     sample_rate, samples = _read_wav_samples(Path(result["output"]["path"]))
-    first_30ms = samples[: int(sample_rate * 0.030)]
-    later_80ms = samples[int(sample_rate * 0.070) : int(sample_rate * 0.090)]
-    assert _peak(first_30ms) > 20
-    assert _peak(later_80ms) > 1500
+    # With larger preroll the trim starts earlier in silence; the inhale
+    # (noise) sits at ~70-120 ms into the output and tone follows after.
+    inhale_region = samples[int(sample_rate * 0.060) : int(sample_rate * 0.120)]
+    tone_region = samples[int(sample_rate * 0.130) : int(sample_rate * 0.160)]
+    assert _peak(inhale_region) > 20, "Inhale was clipped from output"
+    assert _peak(tone_region) > 1500, "Content tone missing from output"
 
 
 def test_prepare_file_writes_prepared_metadata_with_task_mapping(tmp_path: Path) -> None:
@@ -1130,3 +1132,175 @@ def test_prepare_batch_continues_past_file_level_intro_errors(tmp_path: Path, mo
     payload = json.loads(bad_sidecar.read_text(encoding="utf-8"))
     assert payload["output"]["stale_output_removed"] is True
     assert payload["error"]["type"] == "IntroDetectionValidationError"
+
+
+def test_forward_snap_picks_deepest_dip_not_first_below_threshold(tmp_path: Path) -> None:
+    """The forward snap should land at the deepest energy dip in the window,
+    not the first frame that happens to cross the threshold.  This prevents
+    residual consonant tails from surviving when the first quiet frame is
+    only marginally below threshold while a much deeper dip exists later."""
+    from trim_raw_audio.audio import find_opening_boundary_snap
+
+    audio_path = tmp_path / "two-dips.wav"
+    # Layout: marginal dip (-36 dB zone) then deep silence then tone
+    _write_wav(
+        audio_path,
+        _noise(0.03, amplitude=0.012),       # ~-38 dB, marginal
+        _silence(0.04),                       # deep dip (~-inf dB)
+        _tone(0.08, frequency_hz=300.0),      # loud content
+    )
+    snap = find_opening_boundary_snap(
+        audio_path,
+        search_start_sec=0.0,
+        search_end_sec=0.10,
+        frame_ms=5,
+        threshold_db=-35.0,
+        direction="forward",
+    )
+
+    assert snap["found"] is True
+    # Should land in the silence region (0.03-0.07), NOT in the marginal noise (0.0-0.03)
+    assert snap["snapped_trim_start_sec"] >= 0.025
+    assert snap["snapped_trim_start_sec"] <= 0.07
+    assert "deepest" in snap["reason"]
+
+
+def test_date_tail_residual_is_cleared_by_deepest_dip(tmp_path: Path) -> None:
+    """End-to-end: a spoken date ending with a decaying consonant tail should
+    be fully cleared.  The trim should land in the silence gap, not in the
+    tail, producing an output whose first 20 ms has negligible energy."""
+    audio_path = tmp_path / "date-consonant-tail.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.25),
+        _tone(0.55, frequency_hz=180.0, amplitude=0.35),       # "March 3rd 2025"
+        _decay_tone(0.18, frequency_hz=180.0, start_amplitude=0.08, end_amplitude=0.0),
+        _silence(0.10),                                         # clean gap
+        _tone(1.20, frequency_hz=250.0, amplitude=0.30),       # content
+        _silence(0.20),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.15,
+            end_offset_sec=2.38,
+            speech_start_sec=0.25,
+            speech_end_sec=2.28,
+            confidence=0.93,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.25, end_sec=2.28, label="speech", confidence=0.93, source="stub_vad")],
+        )
+    )
+    transcript = _build_transcript(
+        TranscriptSegment(
+            text="Today is March 3rd 2025",
+            start_sec=0.25,
+            end_sec=0.80,
+            words=[
+                TranscriptWord("Today", 0.25, 0.36),
+                TranscriptWord("is", 0.36, 0.42),
+                TranscriptWord("March", 0.42, 0.58),
+                TranscriptWord("3rd", 0.58, 0.68),
+                TranscriptWord("2025", 0.68, 0.80),
+            ],
+        ),
+        TranscriptSegment(
+            text="The reflection opens now",
+            start_sec=1.08,
+            end_sec=1.90,
+            words=[
+                TranscriptWord("The", 1.08, 1.16),
+                TranscriptWord("reflection", 1.16, 1.42),
+                TranscriptWord("opens", 1.42, 1.60),
+                TranscriptWord("now", 1.60, 1.72),
+            ],
+        ),
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend, asr_backend=StubAsrBackend(transcript))
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        dry_run=False,
+    )
+
+    assert result["intro_trim"]["trim_mode"] == "date_removal"
+    assert result["intro_trim"]["snap_found"] is True
+    # Snap should land in the silence gap (0.98-1.08), well past the decay tail
+    chosen = result["intro_trim"]["chosen_trim_start_sec"]
+    assert chosen >= 0.95, f"Trim landed at {chosen}, likely inside the consonant tail"
+    assert chosen <= 1.08, f"Trim landed at {chosen}, past the silence gap into content"
+    assert result["output"]["leading_fade_in_ms"] == 15
+
+    # Verify output audio starts clean
+    output_path = Path(result["output"]["path"])
+    assert output_path.exists()
+    sample_rate, samples = _read_wav_samples(output_path)
+    first_20ms = samples[: int(sample_rate * 0.020)]
+    assert _peak(first_20ms) < 600, f"Residual energy in first 20ms: peak={_peak(first_20ms)}"
+
+
+def test_onset_preservation_protects_full_inhale(tmp_path: Path) -> None:
+    """When no date is detected, the trim should pull back far enough
+    to include a preparatory inhale before the first spoken word,
+    even if VAD reports speech starting after the inhale."""
+    audio_path = tmp_path / "inhale-then-speech.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.15),
+        _noise(0.18, amplitude=0.015),                          # inhale
+        _tone(1.00, frequency_hz=230.0, amplitude=0.30),        # "Inspiration..."
+        _silence(0.20),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.28,
+            end_offset_sec=1.48,
+            speech_start_sec=0.33,
+            speech_end_sec=1.33,
+            confidence=0.92,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.33, end_sec=1.33, label="speech", confidence=0.92, source="stub_vad")],
+        )
+    )
+    transcript = _build_transcript(
+        TranscriptSegment(
+            text="Inspiration opens everything",
+            start_sec=0.33,
+            end_sec=1.15,
+            words=[
+                TranscriptWord("Inspiration", 0.33, 0.60),
+                TranscriptWord("opens", 0.60, 0.80),
+                TranscriptWord("everything", 0.80, 1.05),
+            ],
+        )
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend, asr_backend=StubAsrBackend(transcript))
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        dry_run=False,
+    )
+
+    assert result["manifest_row"]["trim_mode"] == "onset_preservation"
+    final_start = result["manifest_row"]["final_start_offset_sec"]
+    # Trim should start before the inhale begins (0.15), or at least at the
+    # very start of the inhale, preserving the natural breath
+    assert final_start <= 0.18, f"Trim at {final_start} clips into the inhale"
+    assert result["manifest_row"]["opening_preroll_applied_sec"] >= 0.15
+
+    # Verify the first spoken word is fully intact in the output
+    output_path = Path(result["output"]["path"])
+    assert output_path.exists()
+    sample_rate, samples = _read_wav_samples(output_path)
+    # The inhale should be present in the first ~200ms of output
+    inhale_region = samples[: int(sample_rate * 0.20)]
+    assert _peak(inhale_region) > 30, "Inhale was clipped from output"

@@ -239,27 +239,54 @@ def find_opening_boundary_snap(
         return result
 
     frame_size = max(1, int(sample_rate_hz * (frame_ms / 1000.0)))
+    frame_starts = list(range(0, len(samples), frame_size))
+
+    if direction == "forward":
+        # Deepest-dip strategy for date-removal: find the quietest frame
+        # in the entire window rather than stopping at the first frame
+        # below threshold, which may still contain a consonant tail.
+        deepest_db = float("inf")
+        deepest_frame_start = 0
+        for frame_start in frame_starts:
+            frame_end = min(len(samples), frame_start + frame_size)
+            frame_db = _rms_dbfs(samples[frame_start:frame_end])
+            if frame_db < deepest_db:
+                deepest_db = frame_db
+                deepest_frame_start = frame_start
+
+        if deepest_db <= threshold_db:
+            frame_end = min(len(samples), deepest_frame_start + frame_size)
+            zero_crossing = _first_zero_crossing(samples, deepest_frame_start, frame_end)
+            snap_index = zero_crossing if zero_crossing is not None else deepest_frame_start
+            result.update(
+                {
+                    "found": True,
+                    "reason": "zero crossing near deepest energy dip" if zero_crossing is not None else "deepest energy dip",
+                    "frame_db": round(deepest_db, 3),
+                    "zero_crossing_used": zero_crossing is not None,
+                    "snapped_trim_start_sec": round(search_start_sec + (snap_index / sample_rate_hz), 3),
+                }
+            )
+        else:
+            result["frame_db"] = round(deepest_db, 3)
+            result["reason"] = "no low-energy snap point found inside the allowed overshoot window"
+            result["best_frame_start_sec"] = round(search_start_sec + (deepest_frame_start / sample_rate_hz), 3)
+        return result
+
+    # Backward: first-below-threshold for onset preservation (unchanged)
     best_db = float("inf")
     best_frame_start = 0
-    frame_starts = list(range(0, len(samples), frame_size))
-    search_order = frame_starts if direction == "forward" else list(reversed(frame_starts))
-
-    for frame_start in search_order:
+    for frame_start in reversed(frame_starts):
         frame_end = min(len(samples), frame_start + frame_size)
-        frame = samples[frame_start:frame_end]
-        frame_db = _rms_dbfs(frame)
+        frame_db = _rms_dbfs(samples[frame_start:frame_end])
         if frame_db < best_db:
             best_db = frame_db
             best_frame_start = frame_start
         if frame_db > threshold_db:
             continue
 
-        if direction == "forward":
-            zero_crossing = _first_zero_crossing(samples, frame_start, frame_end)
-            snap_index = zero_crossing if zero_crossing is not None else frame_start
-        else:
-            zero_crossing = _last_zero_crossing(samples, frame_start, frame_end)
-            snap_index = zero_crossing if zero_crossing is not None else max(frame_start, frame_end - 1)
+        zero_crossing = _last_zero_crossing(samples, frame_start, frame_end)
+        snap_index = zero_crossing if zero_crossing is not None else max(frame_start, frame_end - 1)
         result.update(
             {
                 "found": True,
@@ -272,11 +299,7 @@ def find_opening_boundary_snap(
         return result
 
     result["frame_db"] = round(best_db, 3)
-    result["reason"] = (
-        "no low-energy snap point found inside the allowed overshoot window"
-        if direction == "forward"
-        else "no low-energy snap point found inside the allowed preroll window"
-    )
+    result["reason"] = "no low-energy snap point found inside the allowed preroll window"
     result["best_frame_start_sec"] = round(search_start_sec + (best_frame_start / sample_rate_hz), 3)
     return result
 
