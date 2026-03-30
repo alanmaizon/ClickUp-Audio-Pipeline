@@ -243,6 +243,15 @@ def _join_words(words: Iterable[TranscriptWord]) -> str:
     return " ".join(word.word.strip() for word in words if word.word.strip()).strip()
 
 
+def _first_word_start(segments: list[TranscriptSegment]) -> float | None:
+    for segment in segments:
+        if segment.words:
+            return segment.words[0].start_sec
+        if segment.text.strip():
+            return segment.start_sec
+    return None
+
+
 def _segment_after_time(segment: TranscriptSegment, start_sec: float) -> TranscriptSegment | None:
     if segment.end_sec <= start_sec + 0.001:
         return None
@@ -438,9 +447,13 @@ def detect_intro(
 
     title_segments = [segment for segment in classified_segments if segment.label == "title"]
     content_segments = [segment for segment in classified_segments if segment.label == "content"]
+    preserved_segments = [segment for segment in classified_segments if segment.label in {"title", "content"}]
     title_start_sec = title_segments[0].start_sec if title_segments else None
     title_end_sec = title_segments[-1].end_sec if title_segments else None
     content_start_sec = content_segments[0].start_sec if content_segments else None
+    next_preserved_start_sec = preserved_segments[0].start_sec if preserved_segments else None
+    next_preserved_label = preserved_segments[0].label if preserved_segments else None
+    next_word_start_sec = _first_word_start(remaining_segments) if detected else None
     confidence = round(
         min(
             0.99,
@@ -466,6 +479,9 @@ def detect_intro(
                 "title_start_sec": title_start_sec,
                 "title_end_sec": title_end_sec,
                 "content_start_sec": content_start_sec,
+                "next_word_start_sec": next_word_start_sec,
+                "next_preserved_start_sec": next_preserved_start_sec,
+                "next_preserved_label": next_preserved_label,
             },
         )
 
@@ -482,5 +498,8 @@ def detect_intro(
             "title_start_sec": title_start_sec,
             "title_end_sec": title_end_sec,
             "content_start_sec": content_start_sec,
+            "next_word_start_sec": next_word_start_sec,
+            "next_preserved_start_sec": next_preserved_start_sec,
+            "next_preserved_label": next_preserved_label,
         },
     )

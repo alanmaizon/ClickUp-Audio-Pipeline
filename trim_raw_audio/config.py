@@ -48,7 +48,7 @@ class VadConfig:
 class AsrConfig:
     enabled: bool = True
     backend: str = "faster_whisper"
-    model_size: str = "tiny"
+    model_size: str = "base"
     device: str = "cpu"
     compute_type: str = "int8"
     analysis_window_sec: float = 20.0
@@ -60,7 +60,8 @@ class IntroClassifierConfig:
     enabled: bool = True
     confidence_threshold: float = 0.74
     date_segment_min_score: float = 0.18
-    post_intro_pad_sec: float = 0.05
+    post_intro_pad_sec: float = 0.15
+    min_date_overshoot_sec: float = 0.12
     max_auto_trim_start_sec: float = 12.0
     title_confidence_threshold: float = 0.62
     title_max_words: int = 6

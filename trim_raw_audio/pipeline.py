@@ -42,6 +42,7 @@ class IntroDetectionValidationError(ValueError):
 _ALLOWED_INTRO_LABELS = {"date", "title", "content"}
 _TRAILING_COPY_RE = re.compile(r"(?:[\s_-]*copy|\(\d+\))$", re.IGNORECASE)
 _DATE_TOKEN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_MAX_NEXT_BOUNDARY_INTRUSION_SEC = 0.18
 
 
 def _now_utc() -> str:
@@ -248,6 +249,9 @@ def _build_failure_payload(
         "predicted_title_start_sec": None,
         "predicted_title_end_sec": None,
         "predicted_content_start_sec": None,
+        "chosen_intro_trim_start_sec": None,
+        "intro_overshoot_sec": None,
+        "next_intro_boundary_sec": None,
         "opening_labels": "",
         "confidence_score": 0.0,
         "transcript_snippet": "",
@@ -290,6 +294,7 @@ def _build_failure_payload(
             "message": str(error),
         },
         "intro_detection": None,
+        "intro_trim": None,
         "transcript": None,
         "silence_backend": None,
         "vad_backend": None,
@@ -565,16 +570,123 @@ class RawAudioPreparer:
         reason = f"{start_reason} {end_reason}"
         return "ffmpeg-vad", start, end, confidence, reason, reasons
 
-    def _intro_pad(self, transcript: TranscriptResult, trim_offset_sec: float) -> float:
-        desired = self.config.intro_classifier.post_intro_pad_sec
-        if desired <= 0:
-            return 0.0
+    def _next_word_start(self, transcript: TranscriptResult, trim_offset_sec: float) -> float | None:
         words = [word for segment in transcript.segments for word in segment.words]
         next_word = next((word for word in words if word.start_sec >= trim_offset_sec + 0.001), None)
         if next_word is None:
+            return None
+        return next_word.start_sec
+
+    def _next_intro_boundary(self, intro: IntroDetectionResult, transcript: TranscriptResult) -> tuple[float | None, str | None]:
+        evidence = intro.evidence or {}
+        next_preserved_start = evidence.get("next_preserved_start_sec")
+        next_preserved_label = evidence.get("next_preserved_label")
+        next_word_start = evidence.get("next_word_start_sec")
+        if next_word_start is None and intro.trim_offset_sec is not None:
+            next_word_start = self._next_word_start(transcript, intro.trim_offset_sec)
+
+        candidates: list[tuple[float, str]] = []
+        if next_preserved_start is not None:
+            label = str(next_preserved_label or "preserved_segment")
+            candidates.append((float(next_preserved_start), label))
+        if next_word_start is not None:
+            candidates.append((float(next_word_start), "word"))
+        if not candidates:
+            return None, None
+        return min(candidates, key=lambda item: item[0])
+
+    def _intro_pad(self, transcript: TranscriptResult, trim_offset_sec: float, *, next_boundary_sec: float | None = None) -> float:
+        desired = max(
+            self.config.intro_classifier.post_intro_pad_sec,
+            self.config.intro_classifier.min_date_overshoot_sec,
+        )
+        if desired <= 0:
             return 0.0
-        gap = max(0.0, next_word.start_sec - trim_offset_sec)
-        return max(0.0, min(desired, gap - 0.02))
+
+        boundary_sec = next_boundary_sec
+        if boundary_sec is None:
+            boundary_sec = self._next_word_start(transcript, trim_offset_sec)
+        if boundary_sec is None:
+            return desired
+
+        latest_reasonable_start = boundary_sec + _MAX_NEXT_BOUNDARY_INTRUSION_SEC
+        return max(0.0, min(desired, latest_reasonable_start - trim_offset_sec))
+
+    def _plan_intro_trim(self, intro: IntroDetectionResult, transcript: TranscriptResult) -> dict[str, Any]:
+        if not intro.detected or intro.trim_offset_sec is None:
+            return {
+                "detected": False,
+                "date_end_sec": None,
+                "requested_overshoot_sec": 0.0,
+                "overshoot_used_sec": 0.0,
+                "requested_trim_start_sec": None,
+                "chosen_trim_start_sec": None,
+                "next_word_start_sec": None,
+                "next_preserved_start_sec": None,
+                "next_preserved_label": None,
+                "next_intro_boundary_sec": None,
+                "next_intro_boundary_kind": None,
+                "gap_to_next_boundary_sec": None,
+                "clamped_to_next_boundary": False,
+                "manual_review_reasons": [],
+                "manual_review_clearance": "No spoken date was detected.",
+            }
+
+        evidence = intro.evidence or {}
+        requested_overshoot = max(
+            self.config.intro_classifier.post_intro_pad_sec,
+            self.config.intro_classifier.min_date_overshoot_sec,
+        )
+        next_word_start = evidence.get("next_word_start_sec")
+        if next_word_start is None:
+            next_word_start = self._next_word_start(transcript, intro.trim_offset_sec)
+        next_preserved_start = evidence.get("next_preserved_start_sec")
+        next_preserved_label = evidence.get("next_preserved_label")
+        next_boundary_sec, next_boundary_kind = self._next_intro_boundary(intro, transcript)
+        overshoot_used = self._intro_pad(
+            transcript,
+            intro.trim_offset_sec,
+            next_boundary_sec=next_boundary_sec,
+        )
+        requested_trim_start = intro.trim_offset_sec + requested_overshoot
+        chosen_trim_start = intro.trim_offset_sec + overshoot_used
+        gap_to_next_boundary = None
+        if next_boundary_sec is not None:
+            gap_to_next_boundary = max(0.0, next_boundary_sec - intro.trim_offset_sec)
+
+        review_reasons: list[str] = []
+        if next_boundary_sec is None:
+            review_reasons.append("Spoken date was detected but no reliable next word/content boundary was available.")
+        elif gap_to_next_boundary is not None and gap_to_next_boundary < self.config.intro_classifier.min_date_overshoot_sec:
+            review_reasons.append("Spoken date ended extremely close to the next preserved speech boundary.")
+
+        if not any(segment.label in {"title", "content"} for segment in intro.classified_segments):
+            review_reasons.append("Spoken date was detected but the following title/content segmentation was missing.")
+
+        if overshoot_used + 0.001 < self.config.intro_classifier.min_date_overshoot_sec:
+            review_reasons.append("Automatic spoken-date overshoot stayed below the safe minimum threshold.")
+
+        return {
+            "detected": True,
+            "date_end_sec": round(intro.trim_offset_sec, 3),
+            "requested_overshoot_sec": round(requested_overshoot, 3),
+            "overshoot_used_sec": round(overshoot_used, 3),
+            "requested_trim_start_sec": round(requested_trim_start, 3),
+            "chosen_trim_start_sec": round(chosen_trim_start, 3),
+            "next_word_start_sec": round(float(next_word_start), 3) if next_word_start is not None else None,
+            "next_preserved_start_sec": round(float(next_preserved_start), 3) if next_preserved_start is not None else None,
+            "next_preserved_label": next_preserved_label,
+            "next_intro_boundary_sec": round(float(next_boundary_sec), 3) if next_boundary_sec is not None else None,
+            "next_intro_boundary_kind": next_boundary_kind,
+            "gap_to_next_boundary_sec": round(gap_to_next_boundary, 3) if gap_to_next_boundary is not None else None,
+            "clamped_to_next_boundary": chosen_trim_start + 0.001 < requested_trim_start,
+            "manual_review_reasons": review_reasons,
+            "manual_review_clearance": (
+                "No opening ambiguity was detected around the spoken-date cut."
+                if not review_reasons
+                else ""
+            ),
+        }
 
     def prepare_file(
         self,
@@ -669,6 +781,7 @@ class RawAudioPreparer:
         final_start = boundary_start
         final_end = boundary_end
         spoken_intro_removed_sec = 0.0
+        intro_trim = self._plan_intro_trim(intro, transcript)
 
         if silence.confidence <= 0.10 and (not vad or vad.confidence <= 0.10):
             fallback_reasons.append("No speech window could be isolated with high confidence.")
@@ -677,8 +790,8 @@ class RawAudioPreparer:
             final_end = audio_info.duration_sec
 
         if requested_method == "ffmpeg-vad-asr" and asr_available and intro.detected and intro.trim_offset_sec is not None:
-            intro_pad = self._intro_pad(transcript, intro.trim_offset_sec)
-            intro_start = intro.trim_offset_sec + intro_pad
+            intro_start = float(intro_trim["chosen_trim_start_sec"])
+            manual_review_reasons.extend(intro_trim["manual_review_reasons"])
             if self.config.decision.safe_mode and intro_start > self.config.decision.max_start_trim_sec:
                 fallback_reasons.append("Detected intro exceeded the maximum safe automatic start trim.")
                 manual_review_reasons.append("Intro trim exceeded maximum safe automatic start trim.")
@@ -710,6 +823,7 @@ class RawAudioPreparer:
         if confidence < self.config.decision.manual_review_confidence_below:
             manual_review_reasons.append("Overall trim confidence fell below the manual-review threshold.")
 
+        manual_review_reasons = list(dict.fromkeys(manual_review_reasons))
         manual_review = bool(manual_review_reasons)
         decision_reason = boundary_reason
         if spoken_intro_removed_sec > 0:
@@ -767,6 +881,9 @@ class RawAudioPreparer:
             "predicted_title_start_sec": round(_classified_span_bounds(intro, "title")[0], 3) if _classified_span_bounds(intro, "title")[0] is not None else "",
             "predicted_title_end_sec": round(_classified_span_bounds(intro, "title")[1], 3) if _classified_span_bounds(intro, "title")[1] is not None else "",
             "predicted_content_start_sec": round(_classified_span_bounds(intro, "content")[0], 3) if _classified_span_bounds(intro, "content")[0] is not None else "",
+            "chosen_intro_trim_start_sec": intro_trim["chosen_trim_start_sec"] if intro.detected else "",
+            "intro_overshoot_sec": intro_trim["overshoot_used_sec"] if intro.detected else "",
+            "next_intro_boundary_sec": intro_trim["next_intro_boundary_sec"] if intro.detected else "",
             "opening_labels": _opening_labels(intro),
             "confidence_score": round(confidence, 3),
             "transcript_snippet": intro.transcript_snippet or _transcript_snippet(transcript),
@@ -799,6 +916,7 @@ class RawAudioPreparer:
             "vad_backend": _json_ready(vad) if vad else None,
             "transcript": _json_ready(transcript),
             "intro_detection": _json_ready(intro),
+            "intro_trim": intro_trim,
             "context_phrases": context_phrases,
             "source_metadata": source_metadata,
         }

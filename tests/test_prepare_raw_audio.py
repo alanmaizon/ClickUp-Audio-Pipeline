@@ -267,6 +267,12 @@ def test_spoken_date_intro_is_removed_when_confident(tmp_path: Path) -> None:
     assert result["manifest_row"]["spoken_intro_removed_sec"] >= 1.3
     assert result["manifest_row"]["opening_labels"] == "date|content"
     assert result["manifest_row"]["predicted_date_end_sec"] == pytest.approx(1.74, abs=0.05)
+    assert result["intro_trim"]["requested_overshoot_sec"] == pytest.approx(0.15, abs=0.001)
+    assert result["intro_trim"]["overshoot_used_sec"] == pytest.approx(0.15, abs=0.001)
+    assert result["intro_trim"]["chosen_trim_start_sec"] == pytest.approx(1.89, abs=0.05)
+    assert result["intro_trim"]["next_intro_boundary_sec"] == pytest.approx(1.74, abs=0.05)
+    assert result["decision"]["manual_review"] is True
+    assert "extremely close" in " ".join(result["decision"]["manual_review_reasons"])
     assert Path(result["output"]["path"]).exists()
 
 
@@ -317,6 +323,74 @@ def test_content_without_date_intro_is_left_intact(tmp_path: Path) -> None:
 
     assert result["manifest_row"]["spoken_intro_removed_sec"] == pytest.approx(0.0)
     assert result["manifest_row"]["final_start_offset_sec"] == pytest.approx(0.28, abs=0.05)
+    assert result["decision"]["manual_review"] is False
+    assert result["intro_trim"]["detected"] is False
+
+
+def test_fast_spoken_date_near_content_boundary_triggers_manual_review(tmp_path: Path) -> None:
+    audio_path = tmp_path / "fast-date-content.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.30),
+        _tone(0.85, frequency_hz=185.0),
+        _silence(0.05),
+        _tone(1.20, frequency_hz=255.0),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.20,
+            end_offset_sec=2.30,
+            speech_start_sec=0.30,
+            speech_end_sec=2.20,
+            confidence=0.94,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.30, end_sec=2.20, label="speech", confidence=0.94, source="stub_vad")],
+        )
+    )
+    transcript = _build_transcript(
+        TranscriptSegment(
+            text="Today is March 3rd 2025",
+            start_sec=0.30,
+            end_sec=0.92,
+            words=[
+                TranscriptWord("Today", 0.30, 0.42),
+                TranscriptWord("is", 0.42, 0.48),
+                TranscriptWord("March", 0.48, 0.68),
+                TranscriptWord("3rd", 0.68, 0.78),
+                TranscriptWord("2025", 0.78, 0.92),
+            ],
+        ),
+        TranscriptSegment(
+            text="Breathing starts now",
+            start_sec=0.96,
+            end_sec=1.45,
+            words=[
+                TranscriptWord("Breathing", 0.96, 1.14),
+                TranscriptWord("starts", 1.14, 1.28),
+                TranscriptWord("now", 1.28, 1.38),
+            ],
+        ),
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend, asr_backend=StubAsrBackend(transcript))
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        dry_run=True,
+    )
+
+    assert result["manifest_row"]["opening_labels"] == "date|content"
+    assert result["intro_trim"]["requested_overshoot_sec"] == pytest.approx(0.15, abs=0.001)
+    assert result["intro_trim"]["next_intro_boundary_sec"] == pytest.approx(0.96, abs=0.05)
+    assert result["intro_trim"]["chosen_trim_start_sec"] == pytest.approx(1.07, abs=0.05)
+    assert result["intro_trim"]["overshoot_used_sec"] == pytest.approx(0.15, abs=0.001)
+    assert result["intro_trim"]["clamped_to_next_boundary"] is False
+    assert result["decision"]["manual_review"] is True
+    assert "Spoken date ended extremely close" in " ".join(result["decision"]["manual_review_reasons"])
 
 
 def test_date_followed_by_title_hint_is_removed_before_content(tmp_path: Path) -> None:
@@ -397,6 +471,9 @@ def test_date_followed_by_title_hint_is_removed_before_content(tmp_path: Path) -
     assert result["manifest_row"]["final_start_offset_sec"] < 1.40
     assert result["intro_detection"]["detected"] is True
     assert "context:inspiration" in result["intro_detection"]["matched_patterns"]
+    assert result["intro_trim"]["next_preserved_label"] == "title"
+    assert result["intro_trim"]["overshoot_used_sec"] == pytest.approx(0.15, abs=0.001)
+    assert result["decision"]["manual_review"] is False
 
 
 def test_title_without_date_is_preserved_even_when_it_matches_context(tmp_path: Path) -> None:
@@ -546,6 +623,59 @@ def test_attachment_metadata_can_restore_context_phrases_after_task_id_download(
     assert result["manifest_row"]["opening_labels"] == "date|title|content"
     assert "context:gospel" in result["intro_detection"]["matched_patterns"]
     assert "gospel" in [phrase.lower() for phrase in result["context_phrases"]]
+
+
+def test_date_with_missing_following_boundary_is_flagged_for_review(tmp_path: Path) -> None:
+    audio_path = tmp_path / "date-only-window.wav"
+    _write_wav(
+        audio_path,
+        _silence(0.25),
+        _tone(1.10, frequency_hz=175.0),
+        _silence(0.20),
+    )
+    vad_backend = StubVadBackend(
+        BoundaryEvidence(
+            backend="stub_vad",
+            available=True,
+            start_offset_sec=0.15,
+            end_offset_sec=1.65,
+            speech_start_sec=0.25,
+            speech_end_sec=1.35,
+            confidence=0.92,
+            reason="Synthetic VAD evidence.",
+            spans=[Span(start_sec=0.25, end_sec=1.35, label="speech", confidence=0.92, source="stub_vad")],
+        )
+    )
+    transcript = _build_transcript(
+        TranscriptSegment(
+            text="Recorded on March 7th 2025",
+            start_sec=0.25,
+            end_sec=0.82,
+            words=[
+                TranscriptWord("Recorded", 0.25, 0.36),
+                TranscriptWord("on", 0.36, 0.44),
+                TranscriptWord("March", 0.44, 0.62),
+                TranscriptWord("7th", 0.62, 0.72),
+                TranscriptWord("2025", 0.72, 0.82),
+            ],
+        )
+    )
+    preparer = _default_preparer(tmp_path, vad_backend=vad_backend, asr_backend=StubAsrBackend(transcript))
+
+    result = preparer.prepare_file(
+        audio_path,
+        output_dir=_output_dir(tmp_path),
+        artifact_root=_artifact_dir(tmp_path),
+        requested_method="ffmpeg-vad-asr",
+        dry_run=True,
+    )
+
+    assert result["intro_detection"]["detected"] is True
+    assert result["intro_trim"]["chosen_trim_start_sec"] == pytest.approx(0.97, abs=0.05)
+    assert result["intro_trim"]["next_intro_boundary_sec"] is None
+    assert result["decision"]["manual_review"] is True
+    assert "no reliable next word/content boundary" in " ".join(result["decision"]["manual_review_reasons"]).lower()
+    assert "segmentation was missing" in " ".join(result["decision"]["manual_review_reasons"]).lower()
 
 
 def test_prepare_file_writes_prepared_metadata_with_task_mapping(tmp_path: Path) -> None:
