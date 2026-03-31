@@ -273,18 +273,19 @@ def find_opening_boundary_snap(
             result["best_frame_start_sec"] = round(search_start_sec + (deepest_frame_start / sample_rate_hz), 3)
         return result
 
-    # Backward: first-below-threshold for onset preservation (unchanged)
-    best_db = float("inf")
-    best_frame_start = 0
-    for frame_start in reversed(frame_starts):
+    # Backward: last-quiet-before-rise for onset preservation.
+    # First pass: collect per-frame energy and try absolute threshold.
+    frame_energies: list[tuple[int, float]] = []
+    for frame_start in frame_starts:
         frame_end = min(len(samples), frame_start + frame_size)
         frame_db = _rms_dbfs(samples[frame_start:frame_end])
-        if frame_db < best_db:
-            best_db = frame_db
-            best_frame_start = frame_start
+        frame_energies.append((frame_start, frame_db))
+
+    # Scan backward for the first frame below the absolute threshold.
+    for frame_start, frame_db in reversed(frame_energies):
         if frame_db > threshold_db:
             continue
-
+        frame_end = min(len(samples), frame_start + frame_size)
         zero_crossing = _last_zero_crossing(samples, frame_start, frame_end)
         snap_index = zero_crossing if zero_crossing is not None else max(frame_start, frame_end - 1)
         result.update(
@@ -298,9 +299,35 @@ def find_opening_boundary_snap(
         )
         return result
 
-    result["frame_db"] = round(best_db, 3)
-    result["reason"] = "no low-energy snap point found inside the allowed preroll window"
-    result["best_frame_start_sec"] = round(search_start_sec + (best_frame_start / sample_rate_hz), 3)
+    # Relative-dip fallback: if no frame crossed the absolute threshold
+    # (e.g. an inhale at -30 dBFS vs threshold -35 dBFS), use the quietest
+    # frame in the window provided it is at least 6 dB below the loudest.
+    # This prevents cutting into a breath when the whole preroll window
+    # is above the absolute threshold.
+    if frame_energies:
+        quietest_start, quietest_db = min(frame_energies, key=lambda x: x[1])
+        loudest_db = max(db for _, db in frame_energies)
+        relative_dip_db = 6.0
+        if loudest_db - quietest_db >= relative_dip_db:
+            frame_end = min(len(samples), quietest_start + frame_size)
+            zero_crossing = _last_zero_crossing(samples, quietest_start, frame_end)
+            snap_index = zero_crossing if zero_crossing is not None else max(quietest_start, frame_end - 1)
+            result.update(
+                {
+                    "found": True,
+                    "reason": "zero crossing near relative energy dip" if zero_crossing is not None else "relative energy dip",
+                    "frame_db": round(quietest_db, 3),
+                    "zero_crossing_used": zero_crossing is not None,
+                    "snapped_trim_start_sec": round(search_start_sec + (snap_index / sample_rate_hz), 3),
+                }
+            )
+            return result
+
+        result["frame_db"] = round(quietest_db, 3)
+        result["reason"] = "no low-energy snap point found inside the allowed preroll window"
+        result["best_frame_start_sec"] = round(search_start_sec + (quietest_start / sample_rate_hz), 3)
+    else:
+        result["reason"] = "no low-energy snap point found inside the allowed preroll window"
     return result
 
 

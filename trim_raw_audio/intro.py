@@ -16,7 +16,17 @@ _MONTH_RE = re.compile(
     r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b"
 )
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
-_ORDINAL_RE = re.compile(r"\b\d{1,2}(?:st|nd|rd|th)?\b")
+_SPOKEN_ORDINAL_PARTS = (
+    r"twenty\s+first|twenty\s+second|twenty\s+third|twenty\s+fourth|"
+    r"twenty\s+fifth|twenty\s+sixth|twenty\s+seventh|twenty\s+eighth|"
+    r"twenty\s+ninth|thirty\s+first|"
+    r"first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|"
+    r"eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|"
+    r"seventeenth|eighteenth|nineteenth|twentieth|thirtieth"
+)
+_SPOKEN_ORDINAL_RE = re.compile(rf"\b(?:{_SPOKEN_ORDINAL_PARTS})\b")
+_DAY_NUMBER = r"(?:\d{1,2}(?:st|nd|rd|th)?|(?:" + _SPOKEN_ORDINAL_PARTS + r"))"
+_ORDINAL_RE = re.compile(rf"\b(?:\d{{1,2}}(?:st|nd|rd|th)?|(?:{_SPOKEN_ORDINAL_PARTS}))\b")
 _DATE_PHRASE_RE = re.compile(r"\b(today is|it is|this is|recorded on|on this)\b")
 _HEADER_RE = re.compile(
     r"\b(recording|session|entry|journal|memo|log|note|voice note|check in|check-in)\b"
@@ -25,20 +35,20 @@ _OPENING_DATE_REGEXES = [
     re.compile(
         rf"^(?:(?:today is|it is|this is|recorded on|on this)\s+)?"
         rf"(?:(?:{_WEEKDAY_RE.pattern[2:-2]})\s+)?"
-        rf"(?:the\s+)?\d{{1,2}}(?:st|nd|rd|th)?(?:\s+of)?\s+(?:{_MONTH_RE.pattern[2:-2]})(?:\s+(?:19|20)\d{{2}})?\b"
+        rf"(?:the\s+)?{_DAY_NUMBER}(?:\s+of)?\s+(?:{_MONTH_RE.pattern[2:-2]})(?:\s+(?:19|20)\d{{2}})?\b"
     ),
     re.compile(
         rf"^(?:(?:today is|it is|this is|recorded on|on this)\s+)?"
         rf"(?:(?:{_WEEKDAY_RE.pattern[2:-2]})\s+)?"
-        rf"(?:{_MONTH_RE.pattern[2:-2]})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:\s+(?:19|20)\d{{2}})?\b"
+        rf"(?:{_MONTH_RE.pattern[2:-2]})\s+{_DAY_NUMBER}(?:\s+(?:19|20)\d{{2}})?\b"
     ),
     re.compile(
         rf"^(?:(?:today is|it is|this is|recorded on|on this)\s+)?"
-        rf"(?:{_WEEKDAY_RE.pattern[2:-2]})\s+(?:{_MONTH_RE.pattern[2:-2]})(?:\s+\d{{1,2}}(?:st|nd|rd|th)?)?(?:\s+(?:19|20)\d{{2}})?\b"
+        rf"(?:{_WEEKDAY_RE.pattern[2:-2]})\s+(?:{_MONTH_RE.pattern[2:-2]})(?:\s+{_DAY_NUMBER})?(?:\s+(?:19|20)\d{{2}})?\b"
     ),
 ]
 _DAY_OF_MONTH_RE = re.compile(
-    rf"\b\d{{1,2}}(?:st|nd|rd|th)?\s+of\s+(?:{_MONTH_RE.pattern[2:-2]})\b"
+    rf"\b{_DAY_NUMBER}\s+of\s+(?:{_MONTH_RE.pattern[2:-2]})\b"
 )
 
 
@@ -125,6 +135,7 @@ def _score_date_text(
     has_month = bool(_MONTH_RE.search(normalized))
     has_year = bool(_YEAR_RE.search(normalized))
     has_ordinal = bool(_ORDINAL_RE.search(normalized))
+    has_spoken_ordinal = bool(_SPOKEN_ORDINAL_RE.search(normalized))
     has_date_phrase = bool(_DATE_PHRASE_RE.search(normalized))
     has_header = bool(_HEADER_RE.search(normalized))
     has_day_of_month = bool(_DAY_OF_MONTH_RE.search(normalized))
@@ -165,6 +176,9 @@ def _score_date_text(
     if has_day_of_month:
         score += 0.14
         matches.append("day_of_month")
+    if has_spoken_ordinal and has_month:
+        score += 0.10
+        matches.append("spoken_ordinal")
     if date_combo:
         score += 0.32
         matches.append("date_combo")
@@ -367,6 +381,16 @@ def detect_intro(
     )
     if opening_date_text:
         matched_patterns.extend(opening_date_matches)
+
+    # Positional bonus: when the opening-date regex matched at position 0,
+    # the transcript structurally starts with a calendar date.  This is a
+    # strong signal that the scored text really is a date even without a
+    # prefix phrase like "today is".  Apply only when the base score already
+    # shows meaningful date evidence (month + ordinal/year).
+    if opening_date_end is not None and opening_date_score >= 0.50:
+        opening_date_score = min(opening_date_score + 0.12, 0.97)
+        if "opening_position" not in matched_patterns:
+            matched_patterns.append("opening_position")
 
     segment_date_candidates: list[TranscriptSegment] = []
     if not opening_date_text:

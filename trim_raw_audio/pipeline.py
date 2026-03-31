@@ -634,6 +634,21 @@ class RawAudioPreparer:
         next_preserved_start = evidence.get("next_preserved_start_sec")
         next_preserved_label = evidence.get("next_preserved_label")
         next_boundary_sec, next_boundary_kind = self._next_intro_boundary(intro, transcript)
+
+        # Anchor the overshoot window to the next-word timing when known.
+        # This prevents the snap from overshooting into preserved content
+        # and biases the cut toward the midpoint of the silence gap.
+        next_word_safety_margin_sec = 0.03
+        if next_boundary_sec is not None:
+            snap_search_end_sec = min(
+                snap_search_end_sec,
+                next_boundary_sec - next_word_safety_margin_sec,
+            )
+            gap_midpoint = (raw_date_end_sec + next_boundary_sec) / 2.0
+            if gap_midpoint > initial_trim_start_sec:
+                initial_trim_start_sec = gap_midpoint
+            snap_search_end_sec = max(snap_search_end_sec, initial_trim_start_sec)
+
         snap = find_opening_boundary_snap(
             input_path,
             search_start_sec=initial_trim_start_sec,
