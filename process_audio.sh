@@ -98,6 +98,13 @@ echo "Denoised files:"
 ls -la "$DENOISED_DIR/" 2>/dev/null || echo "  (empty)"
 echo ""
 
+shopt -s nullglob
+denoised_wavs=("$DENOISED_DIR"/*.wav)
+if [ "${#denoised_wavs[@]}" -eq 0 ]; then
+  echo "ERROR: DeepFilterNet produced no output — check installation (torch/torchaudio versions)."
+  exit 1
+fi
+
 # ── Step 2: Normalize + Silence + Export MP3 ──────────────────────────────────
 echo "Step 2/3 — Normalize + add silence + export MP3..."
 processed=0
