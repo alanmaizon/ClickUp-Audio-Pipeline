@@ -144,16 +144,11 @@ def fetch_inprogress_tasks() -> list[dict]:
 
 
 def main():
-    if not OUTPUT_DIR.exists():
-        print(f"audio-output/ folder not found in sacred-space/")
-        print("Run process_audio.sh first.")
-        sys.exit(1)
+    if not OUTPUT_DIR.exists() or not list(OUTPUT_DIR.glob("*.mp3")):
+        print("No MP3s to upload — nothing to do.")
+        return
 
     available_mp3s = list(OUTPUT_DIR.glob("*.mp3"))
-    if not available_mp3s:
-        print(f"No MP3s in {OUTPUT_DIR} — run process_audio.sh first.")
-        sys.exit(1)
-
     print(f"Found {len(available_mp3s)} MP3(s) in audio-output/\n")
 
     total_uploaded = total_skipped = total_errors = 0
