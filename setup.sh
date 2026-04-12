@@ -45,16 +45,11 @@ else
   echo "⚠ ffprobe not found — install with: brew install ffmpeg"
 fi
 
-# Check deepFilter
-DEEPFILTER="/opt/anaconda3/envs/deepfilter/bin/deepFilter"
-if [ -f "$DEEPFILTER" ]; then
-  echo "✓ DeepFilterNet found"
+# Check noisereduce
+if python3 -c "import noisereduce" 2>/dev/null; then
+  echo "✓ noisereduce found"
 else
-  echo "⚠ DeepFilterNet not found — run:"
-  echo "    conda create -n deepfilter python=3.11 -y"
-  echo "    conda activate deepfilter"
-  echo "    conda install pytorch torchaudio -c pytorch -y"
-  echo "    pip install deepfilternet soundfile"
+  echo "⚠ noisereduce not found — run: pip install noisereduce soundfile"
 fi
 
 echo ""
