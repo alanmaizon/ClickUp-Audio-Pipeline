@@ -50,6 +50,8 @@ STATUS_TO   = "in progress"
 AUDIO_EXTS  = {".aac", ".aif", ".aiff", ".flac", ".m4a", ".mp3",
                ".ogg", ".opus", ".wav", ".wma"}
 RETRYABLE   = {429, 500, 502, 503, 504}
+MAX_DOWNLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
+MIN_DOWNLOAD_BYTES = 1024               # 1 KB — anything smaller is likely corrupt
 _COPY_MARKER_RE = re.compile(r"(?:^|[\s_.-])(copy|duplicate)(?:$|[\s_.-])|\(\d+\)$", re.IGNORECASE)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -110,9 +112,12 @@ def api_put(path: str, body: dict) -> None:
             time.sleep(2 ** attempt)
 
 
+MAX_PAGES = 50
+
+
 def fetch_recorded_tasks() -> list[dict]:
     tasks, seen, page = [], set(), 0
-    while True:
+    while page < MAX_PAGES:
         data = api_get(f"/view/{VIEW_ID}/task", {
             "page": page, "include_closed": "false",
             "statuses[]": [STATUS_FROM],
@@ -330,10 +335,21 @@ def _note_duplicate_name(task_id: str, preferred_stem: str, actual_filename: str
 
 
 def download(url: str, dest: Path) -> None:
-    req = request.Request(url, headers={"Authorization": API_KEY,
-                                        "User-Agent": "sacred-space/1.0"})
+    req = request.Request(url, headers={"User-Agent": "sacred-space/1.0"})
     with request.urlopen(req) as r:
-        dest.write_bytes(r.read())
+        chunks = []
+        total = 0
+        while True:
+            chunk = r.read(8192)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_DOWNLOAD_BYTES:
+                raise RuntimeError(f"Download exceeds {MAX_DOWNLOAD_BYTES // (1024*1024)} MB limit")
+            chunks.append(chunk)
+        if total < MIN_DOWNLOAD_BYTES:
+            raise RuntimeError(f"Download too small ({total} bytes) — likely corrupt or empty")
+        dest.write_bytes(b"".join(chunks))
 
 
 def main():

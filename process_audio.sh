@@ -111,7 +111,7 @@ for f in "$DENOISED_DIR"/*.wav; do
     --base-dir "$SCRIPT_DIR" \
     --stem "$source_stem"); then
     echo "    ✗ Failed: could not resolve task ID for ${source_stem}.wav"
-    ((failed++)) || true
+    ((failed++)) || true  # same guard as processed++
     continue
   fi
   output_name="${source_stem}.mp3"
@@ -133,10 +133,10 @@ for f in "$DENOISED_DIR"/*.wav; do
       --task-id "$task_id" \
       --output-filename "$output_name"
     echo "    ✓ ${output_name}"
-    ((processed++)) || true
+    ((processed++)) || true  # ((0)) returns exit 1 in bash; || true prevents set -e abort
   else
     echo "    ✗ Failed: ${output_name}"
-    ((failed++)) || true
+    ((failed++)) || true  # same guard as processed++
   fi
 done
 

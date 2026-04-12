@@ -92,14 +92,19 @@ def api_put(path: str, body: dict) -> None:
             time.sleep(2 ** attempt)
 
 
+def _safe_header_filename(name: str) -> str:
+    return name.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
+
+
 def upload_attachment(task_id: str, file_path: Path) -> None:
     boundary = uuid.uuid4().hex
     mime = mimetypes.guess_type(file_path.name)[0] or "audio/mpeg"
+    safe_name = _safe_header_filename(file_path.name)
     file_data = file_path.read_bytes()
 
     body = (
         f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="attachment"; filename="{file_path.name}"\r\n'
+        f'Content-Disposition: form-data; name="attachment"; filename="{safe_name}"\r\n'
         f"Content-Type: {mime}\r\n\r\n"
     ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
 
@@ -122,9 +127,12 @@ def upload_attachment(task_id: str, file_path: Path) -> None:
             time.sleep(2 ** attempt)
 
 
+MAX_PAGES = 50
+
+
 def fetch_inprogress_tasks() -> list[dict]:
     tasks, seen, page = [], set(), 0
-    while True:
+    while page < MAX_PAGES:
         data = api_get(f"/view/{VIEW_ID}/task", {
             "page": page, "include_closed": "false",
             "statuses[]": [STATUS_FROM],

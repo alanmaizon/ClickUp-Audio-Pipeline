@@ -99,7 +99,9 @@ def resolve_output_for_upload(base_dir: Path, task_id: str) -> Path | None:
     metadata = load_json(output_metadata_path(base_dir, task_id))
     output_filename = metadata.get("output_filename")
     if output_filename:
-        path = output_dir / output_filename
+        path = (output_dir / output_filename).resolve()
+        if not path.is_relative_to(output_dir.resolve()):
+            return None
         if path.exists():
             return path
 
