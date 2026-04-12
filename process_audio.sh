@@ -93,8 +93,9 @@ echo ""
 
 # ── Step 1: De-noise ──────────────────────────────────────────────────────────
 echo "Step 1/3 — DeepFilterNet de-noise..."
-"$DEEPFILTER" "$PREPARED_DIR"/*.wav -o "$DENOISED_DIR/" \
-  2>&1 | grep -E "^(2[0-9]{3}|ERROR|WARN)" || true
+"$DEEPFILTER" "$PREPARED_DIR"/*.wav -o "$DENOISED_DIR/" 2>&1 || true
+echo "Denoised files:"
+ls -la "$DENOISED_DIR/" 2>/dev/null || echo "  (empty)"
 echo ""
 
 # ── Step 2: Normalize + Silence + Export MP3 ──────────────────────────────────
