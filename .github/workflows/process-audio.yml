@@ -25,7 +25,7 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install webrtcvad-wheels faster-whisper deepfilternet
+          pip install --retries 3 --timeout 60 webrtcvad-wheels faster-whisper deepfilternet
 
       - name: Write .env
         run: |
