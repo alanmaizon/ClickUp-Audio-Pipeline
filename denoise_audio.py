@@ -18,9 +18,11 @@ import soundfile as sf
 
 
 def denoise_file(src: Path, dst: Path) -> None:
-    audio, sr = sf.read(src)
-    reduced = nr.reduce_noise(y=audio, sr=sr, stationary=True, prop_decrease=0.75)
-    sf.write(dst, reduced, sr)
+    audio, sr = sf.read(src, always_2d=True)
+    # noisereduce expects (channels, samples); soundfile returns (samples, channels)
+    audio_t = audio.T
+    reduced = nr.reduce_noise(y=audio_t, sr=sr, stationary=True, prop_decrease=0.75)
+    sf.write(dst, reduced.T, sr)
 
 
 def main() -> None:
