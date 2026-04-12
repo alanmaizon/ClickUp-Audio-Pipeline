@@ -45,17 +45,19 @@ DENOISED_DIR="$SCRIPT_DIR/denoised-tmp"
 OUTPUT_DIR="$SCRIPT_DIR/audio-output"
 TRIM_CONFIG="$SCRIPT_DIR/config/trim_audio.toml"
 
-DEEPFILTER="/opt/anaconda3/envs/deepfilter/bin/deepFilter"
+if command -v deepFilter &>/dev/null; then
+  DEEPFILTER="deepFilter"
+elif [ -f "/opt/anaconda3/envs/deepfilter/bin/deepFilter" ]; then
+  DEEPFILTER="/opt/anaconda3/envs/deepfilter/bin/deepFilter"
+else
+  echo "ERROR: deepFilter not found in PATH or /opt/anaconda3/envs/deepfilter/bin/"
+  echo "Run: pip install deepfilternet soundfile"
+  exit 1
+fi
 
 # ── Checks ────────────────────────────────────────────────────────────────────
 if ! command -v ffmpeg &>/dev/null; then
   echo "ERROR: ffmpeg not found. Install: brew install ffmpeg"
-  exit 1
-fi
-
-if [ ! -f "$DEEPFILTER" ]; then
-  echo "ERROR: deepFilter not found at $DEEPFILTER"
-  echo "Run: conda activate deepfilter && pip install deepfilternet soundfile"
   exit 1
 fi
 
