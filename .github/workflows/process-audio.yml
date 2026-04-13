@@ -2,7 +2,7 @@ name: Process ClickUp Audio
 
 on:
   schedule:
-    - cron: "0 9 * * 1"  # Every Monday at 9:00 UTC
+    - cron: "30 11 * * 1"  # Every Monday at 11:30 UTC (12:30 IST summer)
   workflow_dispatch:        # Manual trigger from Actions tab
 
 jobs:
