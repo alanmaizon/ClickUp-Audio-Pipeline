@@ -1,0 +1,8 @@
+# Pinned dependencies for sacred-space audio pipeline
+# torch/torchaudio installed separately from CPU index (see workflow)
+torch==2.8.0
+torchaudio==2.8.0
+deepfilternet==0.5.6
+soundfile>=0.12,<1.0
+webrtcvad-wheels>=2.0.10,<3.0
+faster-whisper>=1.0,<2.0

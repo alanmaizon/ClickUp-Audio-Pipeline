@@ -45,9 +45,13 @@ DENOISED_DIR="$SCRIPT_DIR/denoised-tmp"
 OUTPUT_DIR="$SCRIPT_DIR/audio-output"
 TRIM_CONFIG="$SCRIPT_DIR/config/trim_audio.toml"
 
-DENOISE_SCRIPT="$SCRIPT_DIR/denoise_audio.py"
-if [ ! -f "$DENOISE_SCRIPT" ]; then
-  echo "ERROR: denoise_audio.py not found at $DENOISE_SCRIPT"
+if command -v deepFilter &>/dev/null; then
+  DEEPFILTER="deepFilter"
+elif [ -f "/opt/anaconda3/envs/deepfilter/bin/deepFilter" ]; then
+  DEEPFILTER="/opt/anaconda3/envs/deepfilter/bin/deepFilter"
+else
+  echo "ERROR: deepFilter not found in PATH or /opt/anaconda3/envs/deepfilter/bin/"
+  echo "Run: pip install deepfilternet soundfile"
   exit 1
 fi
 
@@ -88,14 +92,18 @@ echo "Processing $count file(s)..."
 echo ""
 
 # ── Step 1: De-noise ──────────────────────────────────────────────────────────
-echo "Step 1/3 — noisereduce de-noise..."
-python3 "$DENOISE_SCRIPT" "$PREPARED_DIR" "$DENOISED_DIR"
+echo "Step 1/3 — DeepFilterNet de-noise..."
+if ! "$DEEPFILTER" "$PREPARED_DIR"/*.wav -o "$DENOISED_DIR/" 2>&1; then
+  echo "WARNING: DeepFilterNet exited with errors (see above)."
+fi
+echo "Denoised files:"
+ls -la "$DENOISED_DIR/" 2>/dev/null || echo "  (empty)"
 echo ""
 
 shopt -s nullglob
 denoised_wavs=("$DENOISED_DIR"/*.wav)
 if [ "${#denoised_wavs[@]}" -eq 0 ]; then
-  echo "ERROR: Denoising produced no output."
+  echo "ERROR: DeepFilterNet produced no output — check installation (torch/torchaudio versions)."
   exit 1
 fi
 
@@ -106,7 +114,7 @@ failed=0
 
 for f in "$DENOISED_DIR"/*.wav; do
   [ -e "$f" ] || continue
-  source_stem=$(basename "$f" .wav)
+  source_stem=$(basename "$f" .wav | sed 's/_DeepFilterNet3$//')
   if ! task_id=$(python3 "$SCRIPT_DIR/pipeline_naming.py" task-id-for-stem \
     --base-dir "$SCRIPT_DIR" \
     --stem "$source_stem"); then
