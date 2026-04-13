@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .audio import probe_audio, render_waveform_png, trim_audio_to_wav
+from .audio import find_opening_boundary_snap, probe_audio, render_waveform_png, trim_audio_to_wav
 from .backends import FasterWhisperAsrBackend, FfmpegSilenceBackend, WebRtcVadBackend
 from .config import TrimConfig
 from .intro import detect_intro
@@ -248,6 +248,21 @@ def _build_failure_payload(
         "predicted_title_start_sec": None,
         "predicted_title_end_sec": None,
         "predicted_content_start_sec": None,
+        "date_detected": None,
+        "trim_mode": "error",
+        "raw_opening_boundary_sec": None,
+        "opening_preroll_applied_sec": None,
+        "initial_intro_trim_start_sec": None,
+        "initial_onset_trim_start_sec": None,
+        "snapped_intro_trim_start_sec": None,
+        "snapped_onset_trim_start_sec": None,
+        "chosen_intro_trim_start_sec": None,
+        "chosen_onset_trim_start_sec": None,
+        "intro_overshoot_sec": None,
+        "next_intro_boundary_sec": None,
+        "intro_snap_found": None,
+        "onset_snap_found": None,
+        "fade_in_applied_ms": None,
         "opening_labels": "",
         "confidence_score": 0.0,
         "transcript_snippet": "",
@@ -274,6 +289,7 @@ def _build_failure_payload(
             "path": "",
             "artifacts_dir": str(file_artifact_dir),
             "debug_artifacts": {},
+            "leading_fade_in_ms": 0,
             "stale_output_removed": False,
         },
         "decision": {
@@ -290,6 +306,7 @@ def _build_failure_payload(
             "message": str(error),
         },
         "intro_detection": None,
+        "intro_trim": None,
         "transcript": None,
         "silence_backend": None,
         "vad_backend": None,
@@ -565,16 +582,189 @@ class RawAudioPreparer:
         reason = f"{start_reason} {end_reason}"
         return "ffmpeg-vad", start, end, confidence, reason, reasons
 
-    def _intro_pad(self, transcript: TranscriptResult, trim_offset_sec: float) -> float:
-        desired = self.config.intro_classifier.post_intro_pad_sec
-        if desired <= 0:
-            return 0.0
+    def _next_word_start(self, transcript: TranscriptResult, trim_offset_sec: float) -> float | None:
         words = [word for segment in transcript.segments for word in segment.words]
         next_word = next((word for word in words if word.start_sec >= trim_offset_sec + 0.001), None)
         if next_word is None:
-            return 0.0
-        gap = max(0.0, next_word.start_sec - trim_offset_sec)
-        return max(0.0, min(desired, gap - 0.02))
+            return None
+        return next_word.start_sec
+
+    def _next_intro_boundary(self, intro: IntroDetectionResult, transcript: TranscriptResult) -> tuple[float | None, str | None]:
+        evidence = intro.evidence or {}
+        next_preserved_start = evidence.get("next_preserved_start_sec")
+        next_preserved_label = evidence.get("next_preserved_label")
+        next_word_start = evidence.get("next_word_start_sec")
+        if next_word_start is None and intro.trim_offset_sec is not None:
+            next_word_start = self._next_word_start(transcript, intro.trim_offset_sec)
+
+        candidates: list[tuple[float, str]] = []
+        if next_preserved_start is not None:
+            label = str(next_preserved_label or "preserved_segment")
+            candidates.append((float(next_preserved_start), label))
+        if next_word_start is not None:
+            candidates.append((float(next_word_start), "word"))
+        if not candidates:
+            return None, None
+        return min(candidates, key=lambda item: item[0])
+
+    def _plan_date_trim(
+        self,
+        *,
+        input_path: Path,
+        intro: IntroDetectionResult,
+        transcript: TranscriptResult,
+        boundary_start_sec: float,
+    ) -> dict[str, Any]:
+        classifier = self.config.intro_classifier
+        evidence = intro.evidence or {}
+        raw_date_end_sec = float(intro.trim_offset_sec)
+        min_overshoot_sec = max(
+            classifier.post_intro_pad_sec,
+            classifier.min_date_overshoot_sec,
+        )
+        max_overshoot_sec = max(min_overshoot_sec, classifier.max_date_overshoot_sec)
+        initial_trim_start_sec = raw_date_end_sec + min_overshoot_sec
+        snap_search_end_sec = min(
+            raw_date_end_sec + max_overshoot_sec,
+            initial_trim_start_sec + max(0.0, classifier.boundary_snap_window_sec),
+        )
+        next_word_start = evidence.get("next_word_start_sec")
+        if next_word_start is None:
+            next_word_start = self._next_word_start(transcript, raw_date_end_sec)
+        next_preserved_start = evidence.get("next_preserved_start_sec")
+        next_preserved_label = evidence.get("next_preserved_label")
+        next_boundary_sec, next_boundary_kind = self._next_intro_boundary(intro, transcript)
+
+        # Anchor the overshoot window to the next-word timing when known.
+        # This prevents the snap from overshooting into preserved content
+        # and biases the cut toward the midpoint of the silence gap.
+        next_word_safety_margin_sec = 0.03
+        if next_boundary_sec is not None:
+            snap_search_end_sec = min(
+                snap_search_end_sec,
+                next_boundary_sec - next_word_safety_margin_sec,
+            )
+            gap_midpoint = (raw_date_end_sec + next_boundary_sec) / 2.0
+            if gap_midpoint > initial_trim_start_sec:
+                initial_trim_start_sec = gap_midpoint
+            snap_search_end_sec = max(snap_search_end_sec, initial_trim_start_sec)
+
+        snap = find_opening_boundary_snap(
+            input_path,
+            search_start_sec=initial_trim_start_sec,
+            search_end_sec=snap_search_end_sec,
+            frame_ms=classifier.boundary_snap_frame_ms,
+            threshold_db=classifier.boundary_snap_threshold_db,
+            direction="forward",
+        )
+        chosen_trim_start = float(snap["snapped_trim_start_sec"]) if snap["found"] else initial_trim_start_sec
+        overshoot_used = max(0.0, chosen_trim_start - raw_date_end_sec)
+        gap_to_next_boundary = None
+        if next_boundary_sec is not None:
+            gap_to_next_boundary = max(0.0, next_boundary_sec - raw_date_end_sec)
+
+        review_reasons: list[str] = []
+        if next_boundary_sec is None:
+            review_reasons.append("Spoken date was detected but no reliable next word/content boundary was available.")
+        elif gap_to_next_boundary is not None and gap_to_next_boundary < min_overshoot_sec:
+            review_reasons.append("Spoken date ended extremely close to the next preserved speech boundary.")
+
+        if not any(segment.label in {"title", "content"} for segment in intro.classified_segments):
+            review_reasons.append("Spoken date was detected but the following title/content segmentation was missing.")
+
+        if not snap["found"] and next_boundary_sec is not None and next_boundary_sec <= snap_search_end_sec + 0.001:
+            review_reasons.append("No clean acoustic snap point was found before preserved speech began.")
+
+        return {
+            "detected": True,
+            "date_detected": True,
+            "trim_mode": "date_removal",
+            "raw_boundary_start_sec": round(boundary_start_sec, 3),
+            "raw_date_end_sec": round(raw_date_end_sec, 3),
+            "preroll_applied_sec": 0.0,
+            "min_overshoot_sec": round(min_overshoot_sec, 3),
+            "max_overshoot_sec": round(max_overshoot_sec, 3),
+            "overshoot_used_sec": round(overshoot_used, 3),
+            "initial_late_biased_trim_sec": round(initial_trim_start_sec, 3),
+            "initial_onset_trim_sec": None,
+            "snapped_trim_start_sec": round(float(snap["snapped_trim_start_sec"]), 3) if snap["found"] else None,
+            "chosen_trim_start_sec": round(chosen_trim_start, 3),
+            "snap_found": bool(snap["found"]),
+            "snap_reason": str(snap["reason"] or "") if snap["found"] else "",
+            "snap_fallback_reason": "" if snap["found"] else str(snap["reason"] or ""),
+            "boundary_snap_search_start_sec": round(initial_trim_start_sec, 3),
+            "boundary_snap_search_end_sec": round(snap_search_end_sec, 3),
+            "boundary_snap_direction": "forward",
+            "boundary_snap_frame_ms": classifier.boundary_snap_frame_ms,
+            "boundary_snap_threshold_db": classifier.boundary_snap_threshold_db,
+            "next_word_start_sec": round(float(next_word_start), 3) if next_word_start is not None else None,
+            "next_preserved_start_sec": round(float(next_preserved_start), 3) if next_preserved_start is not None else None,
+            "next_preserved_label": next_preserved_label,
+            "next_intro_boundary_sec": round(float(next_boundary_sec), 3) if next_boundary_sec is not None else None,
+            "next_intro_boundary_kind": next_boundary_kind,
+            "gap_to_next_boundary_sec": round(gap_to_next_boundary, 3) if gap_to_next_boundary is not None else None,
+            "fade_in_applied_ms": classifier.leading_fade_in_ms,
+            "manual_review_reasons": review_reasons,
+            "manual_review_clearance": (
+                "No opening ambiguity was detected around the spoken-date cut."
+                if not review_reasons
+                else ""
+            ),
+        }
+
+    def _plan_onset_trim(
+        self,
+        *,
+        input_path: Path,
+        boundary_start_sec: float,
+    ) -> dict[str, Any]:
+        classifier = self.config.intro_classifier
+        preroll_sec = max(0.0, classifier.no_intro_start_preroll_sec)
+        initial_trim_start_sec = max(0.0, boundary_start_sec - preroll_sec)
+        snap_search_start_sec = max(0.0, initial_trim_start_sec - max(0.0, classifier.no_intro_max_backward_snap_sec))
+        snap = find_opening_boundary_snap(
+            input_path,
+            search_start_sec=snap_search_start_sec,
+            search_end_sec=initial_trim_start_sec,
+            frame_ms=classifier.boundary_snap_frame_ms,
+            threshold_db=classifier.boundary_snap_threshold_db,
+            direction="backward",
+        )
+        chosen_trim_start = float(snap["snapped_trim_start_sec"]) if snap["found"] else initial_trim_start_sec
+        preroll_used = max(0.0, boundary_start_sec - chosen_trim_start)
+
+        return {
+            "detected": False,
+            "date_detected": False,
+            "trim_mode": "onset_preservation",
+            "raw_boundary_start_sec": round(boundary_start_sec, 3),
+            "raw_date_end_sec": None,
+            "preroll_applied_sec": round(preroll_used, 3),
+            "min_overshoot_sec": 0.0,
+            "max_overshoot_sec": 0.0,
+            "overshoot_used_sec": 0.0,
+            "initial_late_biased_trim_sec": None,
+            "initial_onset_trim_sec": round(initial_trim_start_sec, 3),
+            "snapped_trim_start_sec": round(float(snap["snapped_trim_start_sec"]), 3) if snap["found"] else None,
+            "chosen_trim_start_sec": round(chosen_trim_start, 3),
+            "snap_found": bool(snap["found"]),
+            "snap_reason": str(snap["reason"] or "") if snap["found"] else "",
+            "snap_fallback_reason": "" if snap["found"] else str(snap["reason"] or ""),
+            "boundary_snap_search_start_sec": round(snap_search_start_sec, 3),
+            "boundary_snap_search_end_sec": round(initial_trim_start_sec, 3),
+            "boundary_snap_direction": "backward",
+            "boundary_snap_frame_ms": classifier.boundary_snap_frame_ms,
+            "boundary_snap_threshold_db": classifier.boundary_snap_threshold_db,
+            "next_word_start_sec": None,
+            "next_preserved_start_sec": None,
+            "next_preserved_label": None,
+            "next_intro_boundary_sec": round(boundary_start_sec, 3),
+            "next_intro_boundary_kind": "boundary_start",
+            "gap_to_next_boundary_sec": None,
+            "fade_in_applied_ms": classifier.leading_fade_in_ms,
+            "manual_review_reasons": [],
+            "manual_review_clearance": "Opening trim preserved preroll before the detected speech onset.",
+        }
 
     def prepare_file(
         self,
@@ -669,6 +859,19 @@ class RawAudioPreparer:
         final_start = boundary_start
         final_end = boundary_end
         spoken_intro_removed_sec = 0.0
+        trim_mode = "date_removal" if intro.detected else "onset_preservation"
+        if intro.detected and intro.trim_offset_sec is not None:
+            intro_trim = self._plan_date_trim(
+                input_path=input_path,
+                intro=intro,
+                transcript=transcript,
+                boundary_start_sec=boundary_start,
+            )
+        else:
+            intro_trim = self._plan_onset_trim(
+                input_path=input_path,
+                boundary_start_sec=boundary_start,
+            )
 
         if silence.confidence <= 0.10 and (not vad or vad.confidence <= 0.10):
             fallback_reasons.append("No speech window could be isolated with high confidence.")
@@ -676,15 +879,17 @@ class RawAudioPreparer:
             final_start = 0.0
             final_end = audio_info.duration_sec
 
-        if requested_method == "ffmpeg-vad-asr" and asr_available and intro.detected and intro.trim_offset_sec is not None:
-            intro_pad = self._intro_pad(transcript, intro.trim_offset_sec)
-            intro_start = intro.trim_offset_sec + intro_pad
+        if trim_mode == "date_removal" and requested_method == "ffmpeg-vad-asr" and asr_available and intro.detected and intro.trim_offset_sec is not None:
+            intro_start = float(intro_trim["chosen_trim_start_sec"])
+            manual_review_reasons.extend(intro_trim["manual_review_reasons"])
             if self.config.decision.safe_mode and intro_start > self.config.decision.max_start_trim_sec:
                 fallback_reasons.append("Detected intro exceeded the maximum safe automatic start trim.")
                 manual_review_reasons.append("Intro trim exceeded maximum safe automatic start trim.")
             else:
                 final_start = max(final_start, intro_start)
                 spoken_intro_removed_sec = max(0.0, final_start - boundary_start)
+        elif trim_mode == "onset_preservation":
+            final_start = max(0.0, min(final_start, float(intro_trim["chosen_trim_start_sec"])))
 
         if requested_method == "ffmpeg-vad-asr" and effective_method != "ffmpeg-vad-asr":
             manual_review_reasons.append("Advanced method fell back because an optional backend was unavailable or low-confidence.")
@@ -710,10 +915,13 @@ class RawAudioPreparer:
         if confidence < self.config.decision.manual_review_confidence_below:
             manual_review_reasons.append("Overall trim confidence fell below the manual-review threshold.")
 
+        manual_review_reasons = list(dict.fromkeys(manual_review_reasons))
         manual_review = bool(manual_review_reasons)
         decision_reason = boundary_reason
         if spoken_intro_removed_sec > 0:
             decision_reason = f"{decision_reason} The opening spoken date was removed while preserving the title and content."
+        elif trim_mode == "onset_preservation" and final_start + 0.001 < boundary_start:
+            decision_reason = f"{decision_reason} A small preroll was preserved to protect the natural speech onset."
 
         decision = DecisionRecord(
             requested_method=requested_method,
@@ -741,13 +949,19 @@ class RawAudioPreparer:
                 debug_artifacts["transcript_preview"] = str(transcript_path)
 
         if not dry_run:
+            fade_in_applied_ms = self.config.intro_classifier.leading_fade_in_ms if final_start > 0 else 0
             trim_audio_to_wav(
                 input_path,
                 output_path,
                 start_offset_sec=final_start,
                 end_offset_sec=final_end,
+                leading_fade_in_ms=fade_in_applied_ms,
             )
             _write_prepared_metadata(input_path, output_path, source_metadata)
+        else:
+            fade_in_applied_ms = self.config.intro_classifier.leading_fade_in_ms if final_start > 0 else 0
+
+        intro_trim["fade_in_applied_ms"] = fade_in_applied_ms
 
         manifest_row = {
             "file_id": file_id,
@@ -767,6 +981,21 @@ class RawAudioPreparer:
             "predicted_title_start_sec": round(_classified_span_bounds(intro, "title")[0], 3) if _classified_span_bounds(intro, "title")[0] is not None else "",
             "predicted_title_end_sec": round(_classified_span_bounds(intro, "title")[1], 3) if _classified_span_bounds(intro, "title")[1] is not None else "",
             "predicted_content_start_sec": round(_classified_span_bounds(intro, "content")[0], 3) if _classified_span_bounds(intro, "content")[0] is not None else "",
+            "date_detected": intro_trim["date_detected"],
+            "trim_mode": intro_trim["trim_mode"],
+            "raw_opening_boundary_sec": intro_trim["raw_boundary_start_sec"],
+            "opening_preroll_applied_sec": intro_trim["preroll_applied_sec"],
+            "initial_intro_trim_start_sec": intro_trim["initial_late_biased_trim_sec"] if intro.detected else "",
+            "initial_onset_trim_start_sec": intro_trim["initial_onset_trim_sec"] if not intro.detected else "",
+            "snapped_intro_trim_start_sec": intro_trim["snapped_trim_start_sec"] if intro.detected else "",
+            "snapped_onset_trim_start_sec": intro_trim["snapped_trim_start_sec"] if not intro.detected else "",
+            "chosen_intro_trim_start_sec": intro_trim["chosen_trim_start_sec"] if intro.detected else "",
+            "chosen_onset_trim_start_sec": intro_trim["chosen_trim_start_sec"] if not intro.detected else "",
+            "intro_overshoot_sec": intro_trim["overshoot_used_sec"] if intro.detected else "",
+            "next_intro_boundary_sec": intro_trim["next_intro_boundary_sec"] if intro.detected else "",
+            "intro_snap_found": intro_trim["snap_found"] if intro.detected else "",
+            "onset_snap_found": intro_trim["snap_found"] if not intro.detected else "",
+            "fade_in_applied_ms": fade_in_applied_ms,
             "opening_labels": _opening_labels(intro),
             "confidence_score": round(confidence, 3),
             "transcript_snippet": intro.transcript_snippet or _transcript_snippet(transcript),
@@ -792,6 +1021,7 @@ class RawAudioPreparer:
                 "path": "" if dry_run else str(output_path),
                 "artifacts_dir": str(file_artifact_dir),
                 "debug_artifacts": debug_artifacts,
+                "leading_fade_in_ms": fade_in_applied_ms,
             },
             "decision": _json_ready(decision),
             "manifest_row": manifest_row,
@@ -799,6 +1029,7 @@ class RawAudioPreparer:
             "vad_backend": _json_ready(vad) if vad else None,
             "transcript": _json_ready(transcript),
             "intro_detection": _json_ready(intro),
+            "intro_trim": intro_trim,
             "context_phrases": context_phrases,
             "source_metadata": source_metadata,
         }

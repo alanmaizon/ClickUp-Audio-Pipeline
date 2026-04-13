@@ -37,7 +37,7 @@ class VadConfig:
     aggressiveness: int = 2
     frame_ms: int = 30
     confidence_threshold: float = 0.60
-    start_pad_sec: float = 0.12
+    start_pad_sec: float = 0.05
     end_pad_sec: float = 0.20
     min_speech_duration_sec: float = 0.25
     max_merge_gap_sec: float = 0.30
@@ -48,7 +48,7 @@ class VadConfig:
 class AsrConfig:
     enabled: bool = True
     backend: str = "faster_whisper"
-    model_size: str = "tiny"
+    model_size: str = "base"
     device: str = "cpu"
     compute_type: str = "int8"
     analysis_window_sec: float = 20.0
@@ -60,11 +60,19 @@ class IntroClassifierConfig:
     enabled: bool = True
     confidence_threshold: float = 0.74
     date_segment_min_score: float = 0.18
-    post_intro_pad_sec: float = 0.05
+    post_intro_pad_sec: float = 0.15
+    min_date_overshoot_sec: float = 0.22
+    max_date_overshoot_sec: float = 0.40
     max_auto_trim_start_sec: float = 12.0
     title_confidence_threshold: float = 0.62
     title_max_words: int = 6
     title_max_duration_sec: float = 3.5
+    boundary_snap_window_sec: float = 0.18
+    boundary_snap_frame_ms: int = 5
+    boundary_snap_threshold_db: float = -35.0
+    no_intro_start_preroll_sec: float = 0.20
+    no_intro_max_backward_snap_sec: float = 0.15
+    leading_fade_in_ms: int = 15
     repeated_phrases: list[str] = field(default_factory=list)
     boilerplate_phrases: list[str] = field(
         default_factory=lambda: [
