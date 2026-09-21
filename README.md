@@ -41,6 +41,10 @@ Use `--stop-after prepare` for a safe first real-data pass if you want to inspec
 
 Use `--clean` to automatically remove audio working files after a successful upload, keeping the workspace ready for the next session. Metadata sidecars are preserved.
 
+## GitHub Actions Schedule
+
+The scheduled `Process ClickUp Audio` workflow is subject to GitHub's public repository inactivity policy: scheduled workflows are automatically disabled after 60 days without repository activity. There is no workflow-level setting to extend that inactivity window. If GitHub disables the schedule, re-enable the workflow in the Actions tab, or make a commit that changes the workflow cron schedule to reactivate it.
+
 ## Individual Stages
 
 If you want to run or debug the stages manually:
