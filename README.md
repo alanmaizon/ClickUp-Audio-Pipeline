@@ -1,4 +1,4 @@
-# ClickUp Audio Pipeline
+# Audio Pipeline
 
 Small local pipeline for:
 
