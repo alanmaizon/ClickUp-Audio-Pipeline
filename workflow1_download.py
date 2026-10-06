@@ -334,6 +334,14 @@ def _note_duplicate_name(task_id: str, preferred_stem: str, actual_filename: str
         print(f"    ⚠ Could not post duplicate comment: {e}")
 
 
+def _report_missing_audio_attachment(task_id: str) -> None:
+    note = (
+        "⚠ Pipeline could not process this task because no audio attachment was found.\n"
+        "Please upload the recording and move this task back to RECORDED."
+    )
+    api_post(f"/task/{task_id}/comment", {"comment_text": note})
+
+
 def download(url: str, dest: Path) -> None:
     req = request.Request(url, headers={"User-Agent": "sacred-space/1.0"})
     with request.urlopen(req) as r:
@@ -360,6 +368,7 @@ def main():
     total_processed = total_skipped = total_errors = 0
 
     while True:
+        progress_made = False
         print(f"Checking for '{STATUS_FROM}' tasks...")
         tasks = fetch_recorded_tasks()
         if not tasks:
@@ -392,6 +401,7 @@ def main():
                     api_put(f"/task/{task_id}", {"status": STATUS_TO})
                     print(f"    ✓ Status updated\n")
                     total_processed += 1
+                    progress_made = True
                 except Exception as e:
                     print(f"    ✗ Status update failed: {e}\n")
                     total_errors += 1
@@ -402,8 +412,13 @@ def main():
                 attachments = get_audio_attachments(task_id)
                 att = select_audio_attachment(attachments)
                 if not att:
-                    print(f"    ⚠ No audio attachment — skipping\n")
+                    print(f"    ⚠ No audio attachment — reporting and moving to '{STATUS_TO}'")
+                    _report_missing_audio_attachment(task_id)
+                    api_put(f"/task/{task_id}", {"status": STATUS_TO})
+                    print(f"    ✓ Missing audio reported\n")
                     total_skipped += 1
+                    progress_made = True
+                    time.sleep(0.3)
                     continue
 
                 dest_path = _resolve_download_path(task, task_id, att)
@@ -427,11 +442,16 @@ def main():
 
                 print(f"    ✓ Done\n")
                 total_processed += 1
+                progress_made = True
                 time.sleep(0.4)
 
             except Exception as exc:
                 print(f"    ✗ Error: {exc}\n")
                 total_errors += 1
+
+        if not progress_made:
+            print("No task state changes were possible in this pass; stopping to avoid a retry loop.\n")
+            break
 
     print("=" * 50)
     print(f"Processed: {total_processed}  Skipped: {total_skipped}  Errors: {total_errors}")
