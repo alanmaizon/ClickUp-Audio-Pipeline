@@ -189,3 +189,57 @@ def test_check_name_mismatch_handles_api_error_gracefully(capsys) -> None:
 
     captured = capsys.readouterr()
     assert "Could not post mismatch comment" in captured.out
+
+
+def test_main_reports_missing_audio_and_advances_status(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(download_module, "INPUT_DIR", tmp_path)
+    monkeypatch.setattr(download_module, "INPUT_META_DIR", tmp_path / ".metadata")
+    monkeypatch.setattr(download_module.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(download_module, "_existing_audio_download", lambda _task_id: None)
+
+    calls = {"count": 0}
+
+    def fake_fetch_recorded_tasks() -> list[dict]:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return [{"id": "task001", "name": "missing-audio"}]
+        return []
+
+    monkeypatch.setattr(download_module, "fetch_recorded_tasks", fake_fetch_recorded_tasks)
+    monkeypatch.setattr(download_module, "get_audio_attachments", lambda _task_id: [])
+
+    with (
+        patch.object(download_module, "api_post") as mock_post,
+        patch.object(download_module, "api_put") as mock_put,
+    ):
+        download_module.main()
+
+    mock_post.assert_called_once()
+    assert mock_post.call_args[0][0] == "/task/task001/comment"
+    assert "no audio attachment" in mock_post.call_args[0][1]["comment_text"].lower()
+    mock_put.assert_called_once_with("/task/task001", {"status": download_module.STATUS_TO})
+
+    captured = capsys.readouterr()
+    assert "No 'RECORDED' tasks remaining. All done." in captured.out
+
+
+def test_main_stops_when_no_progress_is_possible(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(download_module, "INPUT_DIR", tmp_path)
+    monkeypatch.setattr(download_module, "INPUT_META_DIR", tmp_path / ".metadata")
+    monkeypatch.setattr(download_module.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(download_module, "_existing_audio_download", lambda _task_id: None)
+    monkeypatch.setattr(
+        download_module,
+        "fetch_recorded_tasks",
+        lambda: [{"id": "task001", "name": "missing-audio"}],
+    )
+    monkeypatch.setattr(download_module, "get_audio_attachments", lambda _task_id: [])
+
+    with (
+        patch.object(download_module, "api_post"),
+        patch.object(download_module, "api_put", side_effect=Exception("status error")),
+    ):
+        download_module.main()
+
+    captured = capsys.readouterr()
+    assert "No task state changes were possible in this pass; stopping to avoid a retry loop." in captured.out
